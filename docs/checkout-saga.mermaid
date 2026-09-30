@@ -1,0 +1,61 @@
+sequenceDiagram
+    participant Buyer
+    participant OrderSvc as order-service
+    participant PromoSvc as promotion-service
+    participant PaymentSvc as payment-service
+    participant Kafka
+    participant InvSvc as inventory-service
+    participant PlatformSvc as platform-service
+
+    Buyer->>OrderSvc: POST /orders/checkout (cart, coupon?)
+    OrderSvc->>PromoSvc: GET /coupons/validate (sync)
+    PromoSvc-->>OrderSvc: valid, discount amount
+
+    OrderSvc->>OrderSvc: create Order (PENDING)
+    OrderSvc->>Kafka: publish MerchantChargeRequested (per merchant)
+    OrderSvc->>Kafka: publish StockReserveRequested (per product line)
+
+    par For each merchant
+        Kafka->>PaymentSvc: MerchantChargeRequested
+        PaymentSvc->>PaymentSvc: authorize + capture
+        alt approved
+            PaymentSvc->>Kafka: MerchantCharged
+        else declined
+            PaymentSvc->>Kafka: MerchantDeclined
+        end
+    and For each product line
+        Kafka->>InvSvc: StockReserveRequested
+        InvSvc->>InvSvc: Redis EVAL atomic check-and-decrement
+        alt sufficient stock
+            InvSvc->>Kafka: StockReserved
+        else insufficient stock
+            InvSvc->>Kafka: StockReservationFailed
+        end
+    end
+
+    Kafka->>OrderSvc: all charge results + all reservation results
+
+    alt all merchants charged AND all stock reserved
+        OrderSvc->>OrderSvc: Order.status = SUCCEEDED
+        OrderSvc->>Kafka: publish OrderSucceeded
+        Kafka->>PromoSvc: OrderSucceeded (mark coupon used)
+        Kafka->>PlatformSvc: OrderSucceeded (update GMV/commission projection)
+        Note over InvSvc: no action needed - stock already<br/>committed at reservation time
+        OrderSvc-->>Buyer: 200 order succeeded
+    else at least one declined OR out of stock
+        par Compensate charged merchants
+            OrderSvc->>Kafka: publish MerchantRefundRequested (per already-charged merchant)
+            Kafka->>PaymentSvc: MerchantRefundRequested
+            PaymentSvc->>PaymentSvc: refund
+            PaymentSvc->>Kafka: MerchantRefunded
+        and Compensate reserved stock
+            OrderSvc->>Kafka: publish StockReleaseRequested (per already-reserved product)
+            Kafka->>InvSvc: StockReleaseRequested
+            InvSvc->>InvSvc: Redis EVAL atomic increment back
+            InvSvc->>Kafka: StockReleased
+        end
+        Kafka->>OrderSvc: all refunds + all releases confirmed
+        OrderSvc->>OrderSvc: Order.status = FAILED
+        OrderSvc->>Kafka: publish OrderFailed
+        OrderSvc-->>Buyer: 200 order failed (reason: declined merchant or out-of-stock line, others auto-reversed)
+    end
