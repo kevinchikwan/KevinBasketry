@@ -25,7 +25,8 @@ sequenceDiagram
         end
     and For each product line
         Kafka->>InvSvc: StockReserveRequested
-        InvSvc->>InvSvc: Redis EVAL atomic check-and-decrement
+        InvSvc->>InvSvc: Redis EVAL atomic pre-check + decrement
+        InvSvc->>InvSvc: Postgres conditional UPDATE + StockReservation (commit)
         alt sufficient stock
             InvSvc->>Kafka: StockReserved
         else insufficient stock
@@ -51,7 +52,7 @@ sequenceDiagram
         and Compensate reserved stock
             OrderSvc->>Kafka: publish StockReleaseRequested (per already-reserved product)
             Kafka->>InvSvc: StockReleaseRequested
-            InvSvc->>InvSvc: Redis EVAL atomic increment back
+            InvSvc->>InvSvc: Postgres delete reservation + increment, then Redis increment
             InvSvc->>Kafka: StockReleased
         end
         Kafka->>OrderSvc: all refunds + all releases confirmed
