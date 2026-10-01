@@ -6,7 +6,7 @@ they talk to each other.
 
 | Service | Status |
 |---|---|
-| `identity-service` | Not started |
+| `identity-service` | In progress |
 | `catalog-service` | Not started |
 | `merchant-service` | Not started |
 | `inventory-service` | Not started |
