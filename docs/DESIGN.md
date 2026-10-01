@@ -40,7 +40,7 @@ the owning service's API):
 | `merchant-service` | Merchant profile, onboarding, commission rate, KYC | `identity-service` (creating merchant login) |
 | `inventory-service` | Stock counts | consumes stock reserve/release request events (Section 5), Redis (atomic pre-check) |
 | `payment-service` | Deterministic authorization mock (card-number lookup table) | — (no outbound dependencies) |
-| `order-service` | Checkout orchestration, saga coordination (no cart state — cart is client-side) | `catalog-service`, `promotion-service`, publishes/consumes checkout events |
+| `order-service` | Checkout orchestration, saga coordination (no cart state — cart is client-side) | `identity-service` (live buyer-active check at checkout), `catalog-service`, `promotion-service`, publishes/consumes checkout events |
 | `promotion-service` | Coupons | consumes `OrderSucceeded` / `OrderFailed` events |
 | `conversation-service` | Order-scoped message threads | `order-service` (validating order/merchant references) |
 | `platform-service` | Admin read-model: GMV, commission, order stats | consumes `OrderSucceeded` events (CQRS-style projection) |
@@ -71,20 +71,49 @@ happen at implementation time.
 ```
 Account
   id (PK)
-  email (unique)
-  passwordHash
-  buyerActive: boolean          -- can this account act as a buyer
-  merchantId: nullable(Long)    -- FK to merchant-service's Merchant, if linked
+  email (unique)                -- stored lowercase; uniqueness is case-insensitive
+  passwordHash                  -- BCrypt; plaintext minimum 8 characters
+  buyerActive: boolean          -- the account-level login gate (see below)
+  merchantId: nullable(Long)    -- reference to merchant-service's Merchant, if linked
   merchantActive: boolean       -- denormalized cache of merchant-service's Merchant.active;
-                                --   never written via any identity-service API
+                                --   set once at link time, afterwards only by the event
   createdAt
 ```
 `merchantActive` is kept in sync by consuming `merchant.status.changed`,
 the same pattern `catalog-service` uses. `merchant-service`'s
 `Merchant.active` is the only source of truth: a merchant is activated or
 deactivated only via `PATCH /merchants/{code}`, and the change reaches
-`identity-service` through the event. It stays independent of
-`buyerActive` (REQUIREMENTS Section 4).
+`identity-service` through the event. The one exception is the internal
+merchant-link call (Section 3), which sets `merchantId` and an initial
+`merchantActive = true` when the link is created, because a newly
+onboarded merchant starts active. That is a one-time seed, not a general
+write API. Seeding at link time also avoids a race in which a status
+event arrives before the link exists.
+
+**Login rules:** `buyerActive` decides whether the account can log in at
+all. A deactivated buyer cannot log in anywhere, including the Merchant
+portal, whatever `merchantActive` says. `merchantActive` only adds the
+`MERCHANT` capability to an account that can already log in
+(REQUIREMENTS Section 4).
+
+**Tokens:**
+- JWTs are signed with **RS256**. `identity-service` holds the private key
+  and is the only signer. It publishes the public key at a JWKS endpoint
+  (`GET /.well-known/jwks.json`). The other services fetch and cache it
+  through Spring Security's resource-server support, so a key rotation
+  needs no redeploy of the other eight services.
+- Lifetime is 1 hour, with no refresh tokens: the user logs in again on
+  expiry. Logout is client-side (discard the token); there is no session
+  state and no list of revoked tokens.
+- Claims: `sub` (account ID), `capabilities` as an array — `["BUYER"]`,
+  `["BUYER","MERCHANT"]` or `["ADMIN"]` (admin never combines with the
+  others) — and `merchantId` when `MERCHANT` is present, so services scope
+  merchant data from the token, not from request parameters. `MERCHANT`
+  is included only if `merchantActive` was true at login.
+- Because tokens are not revoked, a status change can take up to an hour
+  to affect a token that was already issued. Checkout is the exception:
+  `order-service` checks live, through `identity-service`, that the buyer
+  is still active before it starts the saga (FR-A6).
 Admin is not an `Account` row — a small, separate `AdminAccount` table in
 `identity-service`'s own schema. **No API endpoint creates it, ever** — it
 exists only via a database migration/seed script (e.g. Flyway) run once
@@ -94,6 +123,13 @@ or change an admin account is to edit the seed script and redeploy, which
 is the point: the attack surface for "how does someone become platform
 admin" is zero application code, only deploy-time access to the
 migration scripts/infrastructure.
+
+**Email uniqueness spans both tables:** an email may exist in `Account`
+or `AdminAccount`, never both. Every write path checks both tables
+before it creates a row and rejects a collision with a clear conflict
+error: public registration, the merchant-link upsert, and the admin
+seed migration. Without this, login (which checks `Account` first) could
+hide an admin account.
 
 ### merchant-service
 ```
@@ -321,21 +357,45 @@ shape for review.
   body — enforced server-side, not just hidden client-side
 - `POST /auth/login` → JWT (shared across all three front-ends; the JWT's
   claims determine which capabilities the holder has, not which URL they
-  logged in from)
-- `GET /accounts/{id}` (self or Admin)
+  logged in from). One endpoint for everyone: it checks `Account` first,
+  then falls back to `AdminAccount`. An `Account` with `buyerActive =
+  false` is refused (Section 2, login rules)
+- `GET /accounts` (Admin, paginated — FR-A5)
+- `GET /.well-known/jwks.json` (public — RS256 verification key, consumed
+  by every other service's resource-server config)
+- `GET /accounts/{id}` (self or Admin; also used by `order-service`'s
+  live buyer-active check at checkout)
 - `PATCH /accounts/{id}/buyer-status` (Admin)
 - *(No merchant-status endpoint here — merchant activation happens only
   via `PATCH /merchants/{code}` on `merchant-service`; see Section 2.)*
-- `POST /accounts/{id}/merchant-link` (internal-only — called by
+- `POST /internal/accounts/merchant-link` (internal-only — called by
   `merchant-service` during onboarding, not exposed to the public Buyer
-  or Merchant front-ends; secured separately, e.g. service-to-service
-  auth rather than a user JWT)
+  or Merchant front-ends). The body carries `email`, `merchantId`, and
+  `initialPassword` (used only if a new account has to be created). It is
+  an **upsert by email**:
+  - If an account with that email exists, the call links the merchant
+    and keeps the existing password.
+  - If not, it creates a new account with the initial password.
+  - Either way it sets `merchantId` and `merchantActive = true` (the
+    one-time seed, Section 2).
+  - It rejects an account that is already linked to a different
+    merchant (at most one merchant per account, REQUIREMENTS Section 4).
+  - It rejects an existing account with `buyerActive = false`, with an
+    error telling Admin to reactivate the buyer account first. Otherwise
+    it would create a merchant who can never log in.
+  - It rejects an email that already belongs to an `AdminAccount`.
+
+  Secured by a **shared API key** stored in a Kubernetes Secret, never a
+  user JWT. Optionally, a k3s NetworkPolicy can also restrict which pods
+  can reach it, but the API key is the primary control. There is no
+  OAuth client-credentials flow.
 - *(No endpoint for creating an Admin account exists anywhere in this
   service, or any other. See Section 2 — Admin is seeded via migration.)*
 
 **merchant-service**
-- `POST /merchants` (Admin — onboarding, also triggers merchant account
-  linkage in identity-service)
+- `POST /merchants` (Admin — onboarding; the form includes the login
+  email and, for a new account, an initial password. Calls
+  identity-service's internal merchant-link upsert)
 - `GET /merchants`, `GET /merchants/{code}`
 - `PATCH /merchants/{code}` (Admin — commission rate, active flag; the
   only way to change merchant active status — publishes `merchant.status.changed`)
@@ -377,7 +437,10 @@ See `checkout-saga.mermaid` for the full diagram. Summary:
 
 **Happy path:**
 1. Buyer → `order-service`: `POST /orders/checkout`
-2. `order-service` → `promotion-service`: validate coupon (sync, if present)
+2. `order-service` → `identity-service`: confirm the buyer is still
+   active (sync, live check — FR-A6; a deactivated buyer is rejected
+   before anything else happens), then `order-service` →
+   `promotion-service`: validate coupon (sync, if present)
 3. `order-service` creates `Order` in `PENDING`, then publishes, in
    parallel: one `MerchantChargeRequested` event per merchant whose net
    amount owed is above zero (a merchant whose net is zero after the

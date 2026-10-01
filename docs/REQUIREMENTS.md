@@ -53,9 +53,18 @@ Explicitly out of scope for this version:
 
 ## 4. Accounts & authentication
 
-- One account per person, identified by email + password (BCrypt-hashed),
-  session or JWT-based auth via Spring Security. No email verification, no
-  password reset flow (out of scope).
+- One account per person, identified by email + password (BCrypt-hashed).
+  Email is case-insensitive (normalized to lowercase before it is stored
+  or compared). Passwords must be at least 8 characters; no other
+  password rules. No email verification, no password reset flow (out of
+  scope).
+- Authentication is a stateless JWT (Spring Security), valid for 1 hour,
+  with no refresh tokens: the user logs in again when it expires. Logout
+  means the client discards the token; there is no server-side session.
+- **`buyerActive` is the login gate for the whole account.** A deactivated
+  buyer cannot log in anywhere, including the Merchant portal, whatever
+  their merchant status. Merchant capability is strictly additive on top
+  of an active buyer account and never lets an account log in by itself.
 - Every account has the **Buyer** capability by default — anyone with an
   account can browse and check out.
 - An account can *additionally* be linked to a `Merchant` (at most one),
@@ -64,9 +73,13 @@ Explicitly out of scope for this version:
   same login — capabilities are additive, not a single exclusive role.
 - **Admin** is a separate, fixed account type: seeded, not self-registered,
   and not combinable with Buyer/Merchant.
+- An email identifies exactly one login across the whole platform: it
+  cannot belong to both a buyer/merchant account and an admin account.
 - Admin can activate or deactivate a buyer's account, or a merchant
   linkage, independently — deactivating a merchant doesn't delete or
-  affect the same person's buyer capability.
+  affect the same person's buyer capability. This is deliberately not
+  symmetric: deactivating the buyer account blocks login entirely
+  (see above), because buyer is the base identity.
 - Buyer, Merchant, and Admin are three separate front-end applications at
   three separate URLs — not one app with a role switcher. Only the
   Buyer marketplace has public self-registration; Merchant and Admin are
@@ -181,7 +194,16 @@ Explicitly out of scope for this version:
 ### 7.1 Merchant onboarding
 - FR-A1: Admin can onboard a new merchant: name, category, KYC-verified
   flag, commission rate (see Section 8), and creates the merchant's login
-  account.
+  account. Onboarding identifies the login by email:
+  - If an account with that email already exists, merchant capability is
+    added to it and its existing password is kept.
+  - If not, a new account is created with an initial password that Admin
+    enters on the onboarding form (at least 8 characters). Admin gives it
+    to the merchant outside the system; there is no automated credential
+    delivery, since that would need the email/password-reset machinery
+    that is out of scope.
+  - Onboarding is rejected if the existing account is deactivated as a
+    buyer; Admin must reactivate it first.
 
 ### 7.2 Merchant management
 - FR-A2: Admin can view all merchants and their status (active/inactive,
@@ -193,7 +215,10 @@ Explicitly out of scope for this version:
 ### 7.3 Buyer account management
 - FR-A5: Admin can view all buyer accounts.
 - FR-A6: Admin can activate or deactivate a buyer account. A deactivated
-  buyer cannot log in or check out.
+  buyer cannot log in (to any portal) or check out. Checkout re-checks
+  buyer status live, so it is blocked immediately. For other actions, a
+  token issued before deactivation keeps working until it expires (at
+  most 1 hour); this delay is accepted.
 
 ### 7.4 Platform revenue / sales management
 - FR-A7: Admin can see platform-wide stats: total orders, total GMV

@@ -1,13 +1,19 @@
 sequenceDiagram
     participant Buyer
     participant OrderSvc as order-service
+    participant IdentitySvc as identity-service
     participant PromoSvc as promotion-service
     participant PaymentSvc as payment-service
     participant Kafka
     participant InvSvc as inventory-service
     participant PlatformSvc as platform-service
 
-    Buyer->>OrderSvc: POST /orders/checkout (cart, coupon?)
+    Buyer->>OrderSvc: POST /orders/checkout (cart, coupon?, cardNumber)
+    OrderSvc->>IdentitySvc: GET /accounts/{id} (sync, live buyer-active check)
+    IdentitySvc-->>OrderSvc: buyerActive
+    break buyer deactivated
+        OrderSvc-->>Buyer: rejected (account deactivated), nothing started
+    end
     OrderSvc->>PromoSvc: GET /coupons/validate (sync)
     PromoSvc-->>OrderSvc: valid, discount amount
 
