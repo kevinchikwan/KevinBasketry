@@ -25,7 +25,8 @@ authorization and settlement as the centerpiece.
 - Show product ownership end-to-end: a merchant can manage their own
   catalog, stock, and see their own sales performance.
 - Show platform-operator concerns: onboarding, account management, revenue.
-- Stay screen-shareable and readable without a frontend build step.
+- Stay screen-shareable: the whole system starts locally with one
+  documented command (Docker Compose), with no manual setup steps.
 - Serve as a real deployment target for AWS study (Cloud Practitioner).
 
 ## 3. Non-goals
@@ -36,9 +37,10 @@ Explicitly out of scope for this version:
   simulated, using realistic ISO 8583-style response-code semantics
 - Email verification, password reset, OAuth/social login, 2FA
 - Shipping, tax calculation, multi-currency
-- True distributed transaction / two-phase commit with a coordinator
-  across merchants (all-or-nothing is instead achieved via sequential
-  authorization plus compensating refunds — see Section 10)
+- True distributed transaction / two-phase commit across merchants.
+  All-or-nothing is instead achieved with a saga: charges and stock
+  reservations run in parallel, and anything that succeeded is
+  compensated (refunded / released) if any leg fails — see Section 10
 - Production-grade security hardening (rate limiting, CSRF beyond framework
   defaults, secrets rotation) beyond what the deploy target requires
 - Low-stock alerts / restock workflows (inventory is scoped to a simple
@@ -79,6 +81,8 @@ Explicitly out of scope for this version:
 - FR-B2: Buyer can log in / log out.
 
 ### 5.2 Catalog & cart
+- The cart lives client-side only (in the Buyer app) and is sent in full
+  at checkout. It is not saved across devices or sessions on the server.
 - FR-B3: Buyer can view all products from all active merchants in one
   catalog.
 - FR-B4: Buyer can add products from any number of different merchants to
@@ -96,9 +100,9 @@ Explicitly out of scope for this version:
   successfully charged. If any merchant declines, the whole order fails
   and nothing is charged to the buyer — see Section 10 for the full design
   rationale.
-- FR-B10: If some merchants were already charged before a later merchant
-  declines, those merchants are automatically refunded as part of failing
-  the order, so a failed order never leaves the buyer partially charged.
+- FR-B10: If some merchants in the order were charged but another merchant
+  declines, the charged merchants are automatically refunded as part of
+  failing the order, so a failed order never leaves the buyer partially charged.
 - FR-B11: Stock is reserved (decremented) for each product line at the
   moment checkout is initiated, not only once the whole order is
   confirmed successful — this prevents two buyers from both being able
@@ -238,6 +242,14 @@ Explicitly out of scope for this version:
 - The discount is applied per eligible merchant's subtotal *before*
   authorization — the merchant is authorized for the discounted amount,
   not the full amount with a separate refund/rebate step.
+- A `FIXED` coupon never discounts more than the items it applies to. A
+  merchant coupon is capped at that merchant's subtotal. A platform
+  coupon is capped at the cart's total subtotal and split between
+  merchants in proportion to each merchant's subtotal, with rounding
+  defined in `DESIGN.md` Section 2 (promotion-service).
+- A merchant whose net amount owed (subtotal − discount) comes to zero is
+  not charged at all (no zero-amount authorization), but their items
+  still go through stock reservation like any other line.
 - If the order fails (any merchant declines, triggering the all-or-nothing
   rollback), the coupon is **not** considered used and the buyer can
   retry with the same code.
@@ -259,18 +271,18 @@ declined merchants?**
 
 **Decision: all-or-nothing.** The order only succeeds if every merchant in
 the cart is successfully charged. If any merchant declines, the whole
-order fails: merchants that were already charged earlier in the same
-checkout are automatically refunded, stock is not decremented, and the
+order fails: merchants that were charged in the same checkout are
+automatically refunded, any stock reserved for it is released, and the
 buyer sees a single `FAILED` order with the decline reason for whichever
 merchant caused it.
 
 **Implementation implication:** because each merchant is authorized
-independently and sequentially, "all-or-nothing" isn't free — it requires
-a compensating action (refund) for any merchant already charged before the
-decline is hit. This is a lightweight, single-service compensating-action
-pattern (sequential refund calls after a failure), not a true distributed
-transaction or saga with a coordinator — that heavier machinery is still
-out of scope for this project's size (see Section 3).
+independently (in parallel), "all-or-nothing" isn't free — it requires a
+compensating action for every leg that succeeded: a refund for each
+charged merchant and a stock release for each reserved product. This is
+an orchestrated saga coordinated by `order-service` (see `DESIGN.md`
+Section 4), not a two-phase-commit distributed transaction, which stays
+out of scope (see Section 3).
 
 **Rejected alternative:** partial success (charge who you can, flag who
 declined). Considered first, but rejected as the final design because an
@@ -284,7 +296,7 @@ introducing a third, harder-to-reason-about state.
   full amount charged, stock remains decremented (reserved) for every
   line item.
 - A cart with items from 2+ merchants, one declines → order `FAILED`;
-  any merchant already charged earlier in the same checkout is
+  any merchant already charged in the same checkout is
   automatically refunded; any stock already reserved for that same
   checkout is automatically released back; the buyer sees which merchant
   (or which out-of-stock line) caused the failure and why.

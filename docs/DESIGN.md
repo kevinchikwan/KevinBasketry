@@ -35,12 +35,12 @@ the owning service's API):
 
 | Service | Owns | Talks to |
 |---|---|---|
-| `identity-service` | Accounts, auth, buyer/merchant linkage | — (foundational; everything else validates tokens issued here) |
+| `identity-service` | Accounts, auth, buyer/merchant linkage | consumes `merchant.status.changed` (cached `merchantActive`); otherwise foundational — everything else validates tokens issued here |
 | `catalog-service` | Products, categories | `merchant-service` (merchant active/inactive), `inventory-service`, Redis (read-through cache) |
 | `merchant-service` | Merchant profile, onboarding, commission rate, KYC | `identity-service` (creating merchant login) |
-| `inventory-service` | Stock counts | consumes `OrderSucceeded` events, Redis (atomic decrement) |
-| `payment-service` | Authorization simulator (existing) | — (no outbound dependencies) |
-| `order-service` | Cart→checkout orchestration, saga coordination | `catalog-service`, `promotion-service`, publishes/consumes checkout events |
+| `inventory-service` | Stock counts | consumes stock reserve/release request events (Section 5), Redis (atomic pre-check) |
+| `payment-service` | Deterministic authorization mock (card-number lookup table) | — (no outbound dependencies) |
+| `order-service` | Checkout orchestration, saga coordination (no cart state — cart is client-side) | `catalog-service`, `promotion-service`, publishes/consumes checkout events |
 | `promotion-service` | Coupons | consumes `OrderSucceeded` / `OrderFailed` events |
 | `conversation-service` | Order-scoped message threads | `order-service` (validating order/merchant references) |
 | `platform-service` | Admin read-model: GMV, commission, order stats | consumes `OrderSucceeded` events (CQRS-style projection) |
@@ -52,13 +52,15 @@ Synchronous (REST) vs asynchronous (Kafka event) is deliberately mixed:
   current stock *now*).
 - **Asynchronous (Kafka)** where the consumer doesn't need to block the
   producer, and where decoupling is the whole point — inventory
-  decrementing, commission/GMV projection, and the checkout saga's own
-  charge/decline/refund choreography.
+  decrementing, commission/GMV projection, and the checkout saga's
+  charge/decline/refund messages. The saga is *orchestrated*:
+  `order-service` collects every result and decides whether to commit or
+  compensate; the other services only react to explicit requests.
 
 Kafka runs locally via Docker for development. Deployment target for
 Kafka is a self-managed broker inside the same k3s cluster as the
 services (see Section 7) — avoids AWS MSK's per-broker cost entirely,
-consistent with NFR-5.
+consistent with the single free-tier-eligible instance target (Section 7).
 
 ## 2. Data model, by service
 
@@ -73,9 +75,16 @@ Account
   passwordHash
   buyerActive: boolean          -- can this account act as a buyer
   merchantId: nullable(Long)    -- FK to merchant-service's Merchant, if linked
-  merchantActive: boolean       -- separate from buyerActive; see Section 4 of REQUIREMENTS.md
+  merchantActive: boolean       -- denormalized cache of merchant-service's Merchant.active;
+                                --   never written via any identity-service API
   createdAt
 ```
+`merchantActive` is kept in sync by consuming `merchant.status.changed`,
+the same pattern `catalog-service` uses. `merchant-service`'s
+`Merchant.active` is the only source of truth: a merchant is activated or
+deactivated only via `PATCH /merchants/{code}`, and the change reaches
+`identity-service` through the event. It stays independent of
+`buyerActive` (REQUIREMENTS Section 4).
 Admin is not an `Account` row — a small, separate `AdminAccount` table in
 `identity-service`'s own schema. **No API endpoint creates it, ever** — it
 exists only via a database migration/seed script (e.g. Flyway) run once
@@ -125,26 +134,45 @@ accepting.
 StockLevel
   productId (PK, reference only)
   quantity: int
+
+StockReservation
+  orderId, productId            -- composite PK; doubles as the idempotency key
+  quantity: int
 ```
-Postgres remains the source of truth for `quantity` (durable, survives a
-Redis restart). Redis holds a mirrored counter per product
-(`inventory:stock:{productId}`) used only for the atomic
-check-and-decrement at checkout time.
+Postgres is the source of truth for `quantity` and the gate that decides
+whether a reservation succeeds. Redis holds a mirrored counter per product
+(`inventory:stock:{productId}`) used as a fast atomic pre-check, so
+checkouts that will obviously fail are rejected before touching Postgres.
 
 **Concurrency design:** stock is **reserved at checkout initiation**, in
 parallel with the per-merchant payment authorizations (see Section 4) —
 not deferred until `OrderSucceeded`. This closes the race where two
 buyers could both pass authorization against the same last unit before
-either order finishes. The reservation runs a small Lua script via
-`EVAL` that atomically checks `quantity > requestedQty` and decrements in
-one round trip per product — this is what actually prevents overselling;
-a non-atomic "read then write" from the application layer would have a
-race window between the check and the decrement. Postgres is updated
-asynchronously afterward to stay consistent with Redis, with Redis as the
-concurrency-safe fast path and Postgres as the durable record. If Redis
-and Postgres ever disagree (e.g. after a Redis restart with no
-persistence configured), Postgres wins — a startup reconciliation step
-reloads Redis's counters from Postgres.
+either order finishes. Each reservation runs these steps in order:
+
+1. **Redis pre-check** — a Lua script in one `EVAL` call reads the counter
+   (`tonumber(GET)`), and if `quantity >= requestedQty` decrements it with
+   `DECRBY`, otherwise returns "insufficient". Because the check and the
+   decrement happen in one script, there is no race window between them.
+   A missing key returns a distinct "not loaded" result (not zero stock),
+   so the service reloads that counter from Postgres and retries.
+2. **Postgres gate** — in one transaction:
+   `UPDATE stock_level SET quantity = quantity - :q WHERE product_id = :id AND quantity >= :q`
+   plus an insert into `StockReservation`. If a `StockReservation` row
+   already exists for this `(orderId, productId)`, the message is a
+   redelivery and is treated as a no-op.
+3. **Publish** — `StockReserved` only after step 2 commits. If step 2
+   updates zero rows or fails, Redis is incremented back and
+   `StockReservationFailed` is published.
+
+Because a reservation is never confirmed before Postgres records it,
+Postgres is never behind Redis. If Redis restarts, a startup
+reconciliation reloads its counters from Postgres, and this cannot lead to
+overselling. The cost is one synchronous Postgres write per line item,
+which is acceptable at this scale. Rejected alternatives: Redis AOF
+persistence only shrinks the window in which a crash can lose a
+decrement (to about a second); using Postgres alone would be correct
+but would remove the atomic Redis step this design is meant to show.
 
 **Compensating release:** because stock is reserved eagerly, it becomes a
 third leg of the saga alongside the per-merchant charges (Section 4) — if
@@ -157,9 +185,42 @@ outcomes that only become final once `order-service` confirms the whole
 order succeeded.
 
 ### payment-service
-Unchanged from the existing implementation: `Transaction`,
-`TransactionStatus` (ISO 8583-style codes), `authorize` / `capture` /
-`refund` / `void`.
+Built from scratch as a **deterministic mock**. There is no real card
+network or acquirer (REQUIREMENTS Section 3). The outcome of an
+authorization depends only on the card number, looked up in a fixed
+table:
+
+| Card number | Result | ISO 8583 response code |
+|---|---|---|
+| `4000000000000002` | Approved | `00` |
+| `4000000000000010` | Declined — insufficient funds | `51` |
+| `4000000000000028` | Declined — do not honor | `05` |
+| `4000000000000036` | Declined — expired card | `54` |
+| *any other number* | Approved | `00` |
+
+```
+Transaction
+  id (PK), transactionRef (unique)
+  orderId, merchantId           -- references only
+  amount: BigDecimal
+  responseCode                  -- ISO 8583-style, from the table above
+  status: APPROVED | DECLINED | REFUNDED
+  createdAt
+```
+An approved authorization is captured immediately (authorize + capture
+in one step). A refund of an `APPROVED` transaction always succeeds and
+moves it to `REFUNDED`. Because results are deterministic, every
+single-outcome saga path in Section 4 can be reproduced in demos just by
+choosing a card number.
+
+**Test strategy for mixed outcomes:** a buyer pays a whole order with
+one card, so with the live mock every merchant in an order gets the same
+result. The mixed-outcome path ("2+ merchants, one declines", plus its
+compensating refunds) is therefore verified by **integration tests** that
+publish fake `MerchantCharged` / `MerchantDeclined` events directly to
+`order-service`'s consumer, bypassing `payment-service`. It is validated
+by tests, not by a live demo. There is deliberately no per-merchant
+override in the mock.
 
 ### order-service
 ```
@@ -178,6 +239,12 @@ OrderItem
   quantity, unitPrice
   merchantChargeId: nullable     -- correlates to the saga's per-merchant charge attempt
 ```
+There is no server-side cart. The cart lives only in the Buyer front-end
+and is sent whole in the `POST /orders/checkout` body. `order-service`
+re-validates every line at checkout (product active, merchant active,
+current price from `catalog-service`) and does not trust the prices or
+availability the client sends. Hiding unavailable products in the UI
+(FR-B6/FR-M6) is a convenience; the real check is server-side.
 `Order.status` is intentionally simpler than the old `COMPLETE` /
 `PARTIALLY_PAID` / `FAILED` — since the all-or-nothing decision means
 there's no partial state to represent (see `REQUIREMENTS.md` Section 10).
@@ -198,6 +265,30 @@ Coupon "used" state is derived from consumed `OrderSucceeded` events, not
 a flag set optimistically at checkout time — this is what makes FR
 "a coupon in a failed order is not consumed" correct by construction
 rather than by remembering to roll it back.
+
+**`FIXED` coupons — capping and splitting:**
+
+- *Merchant coupon:* the discount is capped at that merchant's own
+  subtotal.
+- *Platform coupon:* the discount is first capped at the cart's total
+  subtotal, then split between merchants in proportion to each
+  merchant's subtotal (`exact_m = cappedDiscount × subtotal_m / cartSubtotal`).
+  Because of the cap, no merchant's share can exceed that merchant's
+  subtotal.
+- *Rounding (largest-remainder method):* floor each `exact_m` to the
+  cent, sum the floors, and give the leftover cents to the merchants with
+  the largest fractional remainders, one cent each. Ties go to the
+  merchant that appears first in the cart. The shares always sum exactly
+  to `cappedDiscount`.
+- *Zero net amount:* if a merchant's net amount owed
+  (`subtotal_m − share_m`) is zero, that merchant gets **no payment leg**
+  (no zero-amount authorization), but their stock-reservation leg still
+  runs. For a merchant coupon this happens whenever the cap applies. For
+  a platform coupon, the clean case is a capped discount equal to the
+  whole cart subtotal: every merchant's net is zero at once (the full
+  order is comped), and the order succeeds on stock reservation alone.
+  Otherwise a single merchant's net can only reach exactly zero through a
+  rounding coincidence.
 
 ### conversation-service
 ```
@@ -233,7 +324,8 @@ shape for review.
   logged in from)
 - `GET /accounts/{id}` (self or Admin)
 - `PATCH /accounts/{id}/buyer-status` (Admin)
-- `PATCH /accounts/{id}/merchant-status` (Admin)
+- *(No merchant-status endpoint here — merchant activation happens only
+  via `PATCH /merchants/{code}` on `merchant-service`; see Section 2.)*
 - `POST /accounts/{id}/merchant-link` (internal-only — called by
   `merchant-service` during onboarding, not exposed to the public Buyer
   or Merchant front-ends; secured separately, e.g. service-to-service
@@ -245,7 +337,8 @@ shape for review.
 - `POST /merchants` (Admin — onboarding, also triggers merchant account
   linkage in identity-service)
 - `GET /merchants`, `GET /merchants/{code}`
-- `PATCH /merchants/{code}` (Admin — commission rate, active flag)
+- `PATCH /merchants/{code}` (Admin — commission rate, active flag; the
+  only way to change merchant active status — publishes `merchant.status.changed`)
 
 **catalog-service**
 - `GET /products?merchantCode=`
@@ -253,9 +346,18 @@ shape for review.
 - `PATCH /products/{id}` (Merchant, own products only)
 
 **order-service**
-- `POST /orders/checkout` — starts the saga (see Section 4)
+- `POST /orders/checkout` — starts the saga (see Section 4). The body
+  carries the whole client-side cart (`productId`, `quantity` per line),
+  an optional `couponCode`, and `cardNumber`. *(A real system would send
+  a tokenized payment-method reference, never a raw card number.)*
 - `GET /orders?buyerAccountId=` / `?merchantId=`
 - `GET /orders/{reference}`
+
+**payment-service**
+- No REST endpoints for the front-ends. Its interface is the Kafka topics
+  in Section 5 (`order.merchant-charge.requested`,
+  `order.merchant-refund.requested` in; charged / declined / refunded
+  out). Response codes follow the lookup table in Section 2.
 
 **promotion-service**
 - `POST /coupons` (Merchant — scope=MERCHANT, or Admin — scope=PLATFORM)
@@ -277,15 +379,20 @@ See `checkout-saga.mermaid` for the full diagram. Summary:
 1. Buyer → `order-service`: `POST /orders/checkout`
 2. `order-service` → `promotion-service`: validate coupon (sync, if present)
 3. `order-service` creates `Order` in `PENDING`, then publishes, in
-   parallel: one `MerchantChargeRequested` event per merchant in the
-   cart, **and** one `StockReserveRequested` event per product line
-4. `payment-service` consumes each charge request, authorizes+captures,
-   publishes `MerchantCharged` (or `MerchantDeclined`)
-5. `inventory-service` consumes each reservation request, atomically
-   decrements via the Redis Lua script (Section 2), publishes
-   `StockReserved` (or `StockReservationFailed` if insufficient quantity)
-6. `order-service` waits for a result for **every** merchant charge and
-   **every** stock reservation in the order — not just one or the other.
+   parallel: one `MerchantChargeRequested` event per merchant whose net
+   amount owed is above zero (a merchant whose net is zero after the
+   coupon gets no payment leg — Section 2, promotion-service), **and**
+   one `StockReserveRequested` event per product line, for every line
+4. `payment-service` consumes each charge request, looks up the card in
+   the mock table (Section 2), authorizes+captures, and publishes
+   `MerchantCharged` (or `MerchantDeclined` with the response code)
+5. `inventory-service` consumes each reservation request, pre-checks and
+   decrements in Redis, then commits the conditional decrement in Postgres
+   (Section 2), and only then publishes `StockReserved` (or
+   `StockReservationFailed` if insufficient quantity)
+6. `order-service` waits for a result for **every** merchant charge it
+   requested and **every** stock reservation in the order — not just one
+   or the other.
    If **all** are positive (`MerchantCharged` + `StockReserved`): sets
    `Order.status = SUCCEEDED`, publishes `OrderSucceeded`
 7. `promotion-service` and `platform-service` consume `OrderSucceeded`
@@ -304,8 +411,9 @@ See `checkout-saga.mermaid` for the full diagram. Summary:
    not sequentially, since they're independent of each other
 4. `payment-service` consumes refund requests and confirms
    `MerchantRefunded`; `inventory-service` consumes release requests,
-   atomically increments the Redis counter back, and confirms
-   `StockReleased`
+   deletes the `StockReservation` row and increments `stock_level` in one
+   Postgres transaction (a missing row means already released, so no-op),
+   then increments the Redis counter back and confirms `StockReleased`
 5. Once **all** outstanding compensations (refunds and releases) are
    confirmed, `order-service` sets `Order.status = FAILED`, publishes
    `OrderFailed`
@@ -328,8 +436,8 @@ overselling race window this design exists to close.
 
 | Topic | Producer | Consumers | Payload (key fields) |
 |---|---|---|---|
-| `merchant.status.changed` | merchant-service | catalog-service | merchantId, active |
-| `order.merchant-charge.requested` | order-service | payment-service | orderId, merchantId, amount |
+| `merchant.status.changed` | merchant-service | catalog-service, identity-service | merchantId, active |
+| `order.merchant-charge.requested` | order-service | payment-service | orderId, merchantId, amount, cardNumber *(real system: tokenized payment-method reference, not a raw card number)* |
 | `order.merchant.charged` | payment-service | order-service | orderId, merchantId, transactionRef |
 | `order.merchant.declined` | payment-service | order-service | orderId, merchantId, reasonCode |
 | `order.merchant-refund.requested` | order-service | payment-service | orderId, merchantId, transactionRef |
@@ -376,7 +484,7 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
 |---|---|---|
 | Language | **Java 25 (LTS)** | Current LTS as of 2026 (Spring Boot 3.5, previously assumed, reached OSS end-of-life 30 June 2026). Records for DTOs, sealed interfaces + pattern matching for the saga's event types, virtual threads for the I/O-heavy inter-service calls — current, interview-relevant Java |
 | Framework | **Spring Boot 4.1** | Current stable line, built on Spring Framework 7; officially supports Java 25. Consistent across all 9 services |
-| Messaging | **Apache Kafka** | Checkout saga choreography (Section 4/5) |
+| Messaging | **Apache Kafka** | Event transport for the orchestrated checkout saga (Section 4/5) and read-model projections |
 | Caching / atomic ops | **Redis** | Two specific uses, not general-purpose caching everywhere: (1) atomic stock decrement in `inventory-service` to prevent overselling under concurrent checkouts, (2) read-through cache for `catalog-service`'s product listings, which are read far more often than written |
 | Containerization | **Docker** | Every service ships a Dockerfile; Kafka, Redis, and per-service Postgres run via Docker Compose for local dev |
 | Orchestration | **Kubernetes (k3s)** | Manifests for Deployments, Services, ConfigMaps, Secrets, and Ingress — real K8s objects, portable to a managed cluster (EKS) later without rewriting |
