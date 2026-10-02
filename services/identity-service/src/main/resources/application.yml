@@ -17,3 +17,14 @@ spring:
 
   flyway:
     locations: classpath:db/migration
+
+  # Errors are returned as RFC 9457 problem details, never as stack traces.
+  mvc:
+    problemdetails:
+      enabled: true
+
+basketry:
+  cors:
+    # Vite's default dev-server port. Widen this (comma-separated) once the
+    # real front-end URLs exist (DESIGN.md Section 1).
+    allowed-origins: http://localhost:5173
