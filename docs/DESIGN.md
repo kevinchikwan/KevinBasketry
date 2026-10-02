@@ -72,7 +72,9 @@ happen at implementation time.
 Account
   id (PK)
   email (unique)                -- stored lowercase; uniqueness is case-insensitive
-  passwordHash                  -- BCrypt; plaintext minimum 8 characters
+  passwordHash                  -- BCrypt; plaintext must meet the password policy
+                                --   (REQUIREMENTS Section 4: 8-15 chars, upper, lower,
+                                --   digit, special from !@#$%^&*()-_=+)
   buyerActive: boolean          -- the account-level login gate (see below)
   merchantId: nullable(Long)    -- reference to merchant-service's Merchant, if linked
   merchantActive: boolean       -- denormalized cache of merchant-service's Merchant.active;
@@ -371,7 +373,8 @@ shape for review.
 - `POST /internal/accounts/merchant-link` (internal-only — called by
   `merchant-service` during onboarding, not exposed to the public Buyer
   or Merchant front-ends). The body carries `email`, `merchantId`, and
-  `initialPassword` (used only if a new account has to be created). It is
+  `initialPassword` (used only if a new account has to be created; it must
+  meet the password policy, REQUIREMENTS Section 4). It is
   an **upsert by email**:
   - If an account with that email exists, the call links the merchant
     and keeps the existing password.

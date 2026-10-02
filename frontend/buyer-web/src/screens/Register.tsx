@@ -1,21 +1,38 @@
 import { useState, type FormEvent } from 'react';
 import { ApiError, register } from '../api';
+import { meetsPolicy, PASSWORD_RULES } from '../passwordPolicy';
 
 interface Props {
   onRegistered: (email: string) => void;
   onGoToLogin: () => void;
 }
 
-/** Buyer self-registration. The server enforces the rules; minLength just saves a round trip. */
+/**
+ * Buyer self-registration. The password checklist shows the policy before
+ * submitting; the server re-checks it and is authoritative. Confirm password
+ * is a UI-only typo check: it is never sent.
+ */
 export default function Register({ onRegistered, onGoToLogin }: Props) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [submitAttempted, setSubmitAttempted] = useState(false);
+  const [mismatch, setMismatch] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  // Until the first submit the checklist is neutral guidance; after it, unmet rules turn red.
+  const policyError = submitAttempted && !meetsPolicy(password);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setError(null);
+    setSubmitAttempted(true);
+    const passwordsDiffer = password !== confirmPassword;
+    setMismatch(passwordsDiffer);
+    if (!meetsPolicy(password) || passwordsDiffer) {
+      return;
+    }
     setSubmitting(true);
     try {
       await register(email, password);
@@ -40,17 +57,60 @@ export default function Register({ onRegistered, onGoToLogin }: Props) {
             onChange={(e) => setEmail(e.target.value)}
           />
         </label>
+        <div className="field">
+          <label>
+            Password
+            <input
+              type="password"
+              autoComplete="new-password"
+              required
+              value={password}
+              aria-invalid={policyError}
+              aria-describedby="password-rules"
+              onChange={(e) => {
+                setPassword(e.target.value);
+                setMismatch(false);
+              }}
+            />
+          </label>
+          <ul id="password-rules" className="rules" aria-label="Password requirements">
+            {PASSWORD_RULES.map((rule) => {
+              const met = rule.isMet(password);
+              const state = met ? 'met' : policyError ? 'failed' : 'pending';
+              return (
+                <li key={rule.id} className={`rule rule-${state}`} data-rule={rule.id} data-met={met}>
+                  <span className="rule-icon" aria-hidden="true">{met ? '✓' : '○'}</span>
+                  {rule.label}
+                  <span className="visually-hidden">{met ? ' (met)' : ' (not met)'}</span>
+                </li>
+              );
+            })}
+          </ul>
+          {policyError && (
+            <span className="field-error" role="alert">
+              Password doesn't meet all the requirements above.
+            </span>
+          )}
+        </div>
         <label>
-          Password
+          Confirm password
           <input
             type="password"
             autoComplete="new-password"
             required
-            minLength={8}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            value={confirmPassword}
+            aria-invalid={mismatch}
+            aria-describedby={mismatch ? 'confirm-password-error' : undefined}
+            onChange={(e) => {
+              setConfirmPassword(e.target.value);
+              setMismatch(false);
+            }}
           />
-          <span className="hint">At least 8 characters.</span>
+          {mismatch && (
+            <span id="confirm-password-error" className="field-error" role="alert">
+              Passwords do not match.
+            </span>
+          )}
         </label>
         {error && <p className="error" role="alert">{error}</p>}
         <button type="submit" disabled={submitting}>

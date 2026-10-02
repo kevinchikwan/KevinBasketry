@@ -21,6 +21,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.test.web.servlet.MockMvc;
@@ -35,7 +36,7 @@ import org.springframework.test.web.servlet.ResultActions;
 @AutoConfigureMockMvc
 class LoginTests {
 
-    private static final String PASSWORD = "correct-horse-battery";
+    private static final String PASSWORD = "Corr3ct-Horse!";
 
     // Seeded by V2__seed_initial_admin.sql.
     private static final String ADMIN_EMAIL = "admin-placeholder@basketry.example";
@@ -52,6 +53,9 @@ class LoginTests {
 
     @Autowired
     private JdbcTemplate jdbc;
+
+    @Autowired
+    private PasswordEncoder passwordEncoder;
 
     @BeforeEach
     void clearAccounts() {
@@ -114,6 +118,18 @@ class LoginTests {
         assertThat(jwt.getSubject()).isEqualTo(adminId.toString());
         assertThat(jwt.getClaimAsStringList("capabilities")).containsExactly("ADMIN");
         assertThat(jwt.hasClaim("merchantId")).isFalse();
+    }
+
+    @Test
+    void loginDoesNotReapplyPasswordPolicy() throws Exception {
+        // A password set before the current policy (REQUIREMENTS.md Section 4) still works.
+        String legacyPassword = "no-uppercase-or-digit-and-too-long";
+        jdbc.update("INSERT INTO account (email, password_hash, buyer_active, merchant_active, created_at) "
+                        + "VALUES (?, ?, TRUE, FALSE, CURRENT_TIMESTAMP)",
+                "legacy@example.com", passwordEncoder.encode(legacyPassword));
+
+        Jwt jwt = loginAndVerify("legacy@example.com", legacyPassword);
+        assertThat(jwt.getClaimAsStringList("capabilities")).containsExactly("BUYER");
     }
 
     // --- rejected logins ---------------------------------------------------

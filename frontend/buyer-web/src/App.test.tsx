@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
@@ -33,25 +33,29 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function fillAndSubmit(email: string, password: string, buttonName: RegExp) {
+async function fillAndSubmit(email: string, password: string, buttonName: RegExp, confirmPassword?: string) {
   const user = userEvent.setup();
   await user.clear(screen.getByLabelText('Email'));
   await user.type(screen.getByLabelText('Email'), email);
-  await user.type(screen.getByLabelText(/^Password/), password);
+  await user.type(screen.getByLabelText('Password'), password);
+  if (confirmPassword !== undefined) {
+    await user.type(screen.getByLabelText(/^Confirm password/), confirmPassword);
+  }
   await user.click(screen.getByRole('button', { name: buttonName }));
 }
 
 describe('Register', () => {
-  it('posts to /accounts/register, then shows Login with the email filled in', async () => {
+  it('posts only email and password to /accounts/register, then shows Login with the email filled in', async () => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 201 }));
     render(<App />);
     await userEvent.click(screen.getByRole('button', { name: 'Register' }));
 
-    await fillAndSubmit('new@example.com', 'correct-horse', /^Register$/);
+    await fillAndSubmit('new@example.com', 'Corr3ct-Horse!', /^Register$/, 'Corr3ct-Horse!');
 
+    // Exact body: confirm password is a UI-only check and is never sent.
     expect(fetchMock).toHaveBeenCalledWith(`${API}/accounts/register`, expect.objectContaining({
       method: 'POST',
-      body: JSON.stringify({ email: 'new@example.com', password: 'correct-horse' }),
+      body: JSON.stringify({ email: 'new@example.com', password: 'Corr3ct-Horse!' }),
     }));
     expect(await screen.findByRole('heading', { name: 'Log in' })).toBeInTheDocument();
     expect(screen.getByRole('status')).toHaveTextContent('Account created');
@@ -63,12 +67,93 @@ describe('Register', () => {
     render(<App />);
     await userEvent.click(screen.getByRole('button', { name: 'Register' }));
 
-    await fillAndSubmit('taken@example.com', 'correct-horse', /^Register$/);
+    await fillAndSubmit('taken@example.com', 'Corr3ct-Horse!', /^Register$/, 'Corr3ct-Horse!');
 
     expect(await screen.findByRole('alert')).toHaveTextContent('An account with this email already exists.');
     expect(screen.getByRole('heading', { name: 'Create an account' })).toBeInTheDocument();
   });
+
+  it('shows an inline error and does not call the API when the passwords differ', async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole('button', { name: 'Register' }));
+
+    await fillAndSubmit('new@example.com', 'Corr3ct-Horse!', /^Register$/, 'Corr3ct-Hosre!');
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Passwords do not match.');
+    expect(screen.getByLabelText(/^Confirm password/)).toHaveAttribute('aria-invalid', 'true');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByRole('heading', { name: 'Create an account' })).toBeInTheDocument();
+  });
+
+  it('clears the mismatch error on edit and submits once the passwords match', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 201 }));
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: 'Register' }));
+    await fillAndSubmit('new@example.com', 'Corr3ct-Horse!', /^Register$/, 'Corr3ct-Hosre!');
+
+    const confirm = screen.getByLabelText(/^Confirm password/);
+    await user.clear(confirm);
+    expect(screen.queryByText('Passwords do not match.')).not.toBeInTheDocument();
+    await user.type(confirm, 'Corr3ct-Horse!');
+    await user.click(screen.getByRole('button', { name: /^Register$/ }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(`${API}/accounts/register`, expect.objectContaining({
+      body: JSON.stringify({ email: 'new@example.com', password: 'Corr3ct-Horse!' }),
+    }));
+    expect(await screen.findByRole('heading', { name: 'Log in' })).toBeInTheDocument();
+  });
+
+  it('shows the password checklist before anything is typed, then ticks rules off live', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: 'Register' }));
+
+    const checklist = screen.getByRole('list', { name: 'Password requirements' });
+    expect(metRules(checklist)).toEqual([]);
+    expect(within(checklist).getAllByRole('listitem')).toHaveLength(5);
+
+    await user.type(screen.getByLabelText('Password'), 'abc');
+    expect(metRules(checklist)).toEqual(['lower']);
+
+    await user.type(screen.getByLabelText('Password'), 'D1');
+    expect(metRules(checklist)).toEqual(['upper', 'lower', 'digit']);
+
+    await user.type(screen.getByLabelText('Password'), '!xyz');
+    expect(metRules(checklist)).toEqual(['length', 'upper', 'lower', 'digit', 'special']);
+  });
+
+  it('blocks submit and flags unmet rules when the password fails the policy', async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole('button', { name: 'Register' }));
+
+    await fillAndSubmit('new@example.com', 'weakpass', /^Register$/, 'weakpass');
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent("Password doesn't meet all the requirements");
+    expect(screen.getByLabelText('Password')).toHaveAttribute('aria-invalid', 'true');
+    const failed = [...document.querySelectorAll('.rule-failed')].map((li) => li.getAttribute('data-rule'));
+    expect(failed).toEqual(['upper', 'digit', 'special']);
+  });
+
+  it('shows the server rule message if the server still rejects the password', async () => {
+    fetchMock.mockResolvedValueOnce(problem(400, 'Password must contain a digit (0-9).'));
+    render(<App />);
+    await userEvent.click(screen.getByRole('button', { name: 'Register' }));
+
+    await fillAndSubmit('new@example.com', 'Corr3ct-Horse!', /^Register$/, 'Corr3ct-Horse!');
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Password must contain a digit (0-9).');
+  });
 });
+
+function metRules(checklist: HTMLElement): string[] {
+  return within(checklist)
+    .getAllByRole('listitem')
+    .filter((li) => li.getAttribute('data-met') === 'true')
+    .map((li) => li.getAttribute('data-rule')!);
+}
 
 describe('Login', () => {
   const exp = 1_900_000_000;

@@ -55,9 +55,22 @@ Explicitly out of scope for this version:
 
 - One account per person, identified by email + password (BCrypt-hashed).
   Email is case-insensitive (normalized to lowercase before it is stored
-  or compared). Passwords must be at least 8 characters; no other
-  password rules. No email verification, no password reset flow (out of
+  or compared). No email verification, no password reset flow (out of
   scope).
+- **Password policy.** A password must meet all five rules:
+  1. Length 8–15 characters (counted as Unicode code points).
+  2. At least one uppercase letter (`A`–`Z`).
+  3. At least one lowercase letter (`a`–`z`).
+  4. At least one digit (`0`–`9`).
+  5. At least one special character from `!@#$%^&*()-_=+`.
+
+  Other characters are allowed. The policy applies wherever the
+  application sets a password: buyer self-registration and the initial
+  password for a newly onboarded merchant (FR-A1). The server is the
+  authoritative check and names every rule a rejected password fails;
+  the front-ends show the same rules as a live checklist before submit.
+  Login does not re-check the policy, so a password set before a policy
+  change still works.
 - Authentication is a stateless JWT (Spring Security), valid for 1 hour,
   with no refresh tokens: the user logs in again when it expires. Logout
   means the client discards the token; there is no server-side session.
@@ -198,7 +211,8 @@ Explicitly out of scope for this version:
   - If an account with that email already exists, merchant capability is
     added to it and its existing password is kept.
   - If not, a new account is created with an initial password that Admin
-    enters on the onboarding form (at least 8 characters). Admin gives it
+    enters on the onboarding form (it must meet the password policy,
+    Section 4). Admin gives it
     to the merchant outside the system; there is no automated credential
     delivery, since that would need the email/password-reset machinery
     that is out of scope.

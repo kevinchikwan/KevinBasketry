@@ -50,7 +50,7 @@ class CorsTests {
                         .header(HttpHeaders.ORIGIN, DEV_FRONTEND)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"email": "cors@example.com", "password": "correct-horse-battery"}
+                                {"email": "cors@example.com", "password": "Corr3ct-Horse!"}
                                 """))
                 .andExpect(status().isCreated())
                 .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, DEV_FRONTEND))

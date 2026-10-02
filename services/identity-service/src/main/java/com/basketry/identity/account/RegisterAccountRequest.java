@@ -18,7 +18,9 @@ public record RegisterAccountRequest(
         @NotBlank @Email @Size(max = 255)
         String email,
 
-        @NotNull @Size(min = 8)
+        // Presence only: AccountRegistrationService checks the password policy
+        // and names every failed rule (PasswordPolicy).
+        @NotNull
         String password) {
 
     /** Keeps the plaintext password out of any log line that prints this object. */

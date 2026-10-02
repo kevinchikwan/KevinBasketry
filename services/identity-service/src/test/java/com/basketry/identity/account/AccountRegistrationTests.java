@@ -1,10 +1,12 @@
 package com.basketry.identity.account;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -30,7 +32,7 @@ import org.springframework.test.web.servlet.ResultActions;
 @ExtendWith(OutputCaptureExtension.class)
 class AccountRegistrationTests {
 
-    private static final String PASSWORD = "correct-horse-battery";
+    private static final String PASSWORD = "Corr3ct-Horse!";
 
     @Autowired
     private MockMvc mockMvc;
@@ -134,33 +136,81 @@ class AccountRegistrationTests {
         assertThat(accounts.count()).isZero();
     }
 
-    @Test
-    void rejectsPasswordShorterThan8With400() throws Exception {
-        register("""
-                {"email": "buyer@example.com", "password": "1234567"}
-                """)
-                .andExpect(status().isBadRequest())
-                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON));
-
-        assertThat(accounts.count()).isZero();
-    }
+    // --- password policy (REQUIREMENTS.md Section 4) --------------------------
+    // Each rejected case fails exactly one rule, and the response must name that rule.
 
     @Test
-    void acceptsPasswordOfExactly8() throws Exception {
+    void acceptsPasswordMeetingAllRules() throws Exception {
         register("""
-                {"email": "buyer@example.com", "password": "12345678"}
+                {"email": "buyer@example.com", "password": "Abcdef1!"}
                 """)
                 .andExpect(status().isCreated());
     }
 
     @Test
-    void rejectsPasswordLongerThan72BytesWith400() throws Exception {
-        register("""
-                {"email": "buyer@example.com", "password": "%s"}
-                """.formatted("a".repeat(73)))
-                .andExpect(status().isBadRequest());
+    void acceptsPasswordsAtBothLengthLimits() throws Exception {
+        registerWithPassword("min@example.com", "Abcde1!x").andExpect(status().isCreated());     // 8
+        registerWithPassword("max@example.com", "Abcde1!xyzabcde").andExpect(status().isCreated()); // 15
+    }
+
+    @Test
+    void rejectsTooShortPassword() throws Exception {
+        assertRejectedFor("Abcd1!x", "Password must be at least 8 characters.");             // 7
+    }
+
+    @Test
+    void rejectsTooLongPassword() throws Exception {
+        assertRejectedFor("Abcde1!xyzabcdef", "Password must be at most 15 characters.");    // 16
+    }
+
+    @Test
+    void rejectsPasswordWithoutUppercase() throws Exception {
+        assertRejectedFor("abcdef1!", "Password must contain an uppercase letter (A-Z).");
+    }
+
+    @Test
+    void rejectsPasswordWithoutLowercase() throws Exception {
+        assertRejectedFor("ABCDEF1!", "Password must contain a lowercase letter (a-z).");
+    }
+
+    @Test
+    void rejectsPasswordWithoutDigit() throws Exception {
+        assertRejectedFor("Abcdefg!", "Password must contain a digit (0-9).");
+    }
+
+    @Test
+    void rejectsPasswordWithoutSpecialCharacter() throws Exception {
+        assertRejectedFor("Abcdefg1", "Password must contain a special character from !@#$%^&*()-_=+.");
+    }
+
+    @Test
+    void specialCharacterMustComeFromTheAllowedList() throws Exception {
+        // '?' and '.' are allowed in a password but don't count as the special character.
+        assertRejectedFor("Abcdef1?.", "Password must contain a special character from !@#$%^&*()-_=+.");
+    }
+
+    @Test
+    void namesEveryFailedRuleAtOnce() throws Exception {
+        registerWithPassword("buyer@example.com", "abc")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.violations", contains(
+                        "Password must be at least 8 characters.",
+                        "Password must contain an uppercase letter (A-Z).",
+                        "Password must contain a digit (0-9).",
+                        "Password must contain a special character from !@#$%^&*()-_=+.")));
 
         assertThat(accounts.count()).isZero();
+    }
+
+    @Test
+    void lengthCountsCharactersNotUtf16Units() throws Exception {
+        // 15 code points; the emoji is 2 UTF-16 units, so String.length() would say 16.
+        registerWithPassword("buyer@example.com", "Abcde1!xyzabcd😀").andExpect(status().isCreated());
+    }
+
+    @Test
+    void sixteenCharactersIncludingEmojiIsTooLong() throws Exception {
+        assertRejectedFor("Abcde1!xyzabcde😀", "Password must be at most 15 characters.");
     }
 
     @Test
@@ -207,6 +257,24 @@ class AccountRegistrationTests {
         mockMvc.perform(get("/accounts/register"))
                 .andExpect(status().isUnauthorized())
                 .andExpect(header().doesNotExist("Location"));
+    }
+
+    /** Expects a 400 problem whose detail and violations list name exactly the one failed rule. */
+    private void assertRejectedFor(String password, String expectedViolation) throws Exception {
+        registerWithPassword("buyer@example.com", password)
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.detail").value(expectedViolation))
+                .andExpect(jsonPath("$.violations", contains(expectedViolation)));
+
+        assertThat(accounts.count()).isZero();
+    }
+
+    /** Builds the JSON with the JSON-escaped password, so any character can be tested. */
+    private ResultActions registerWithPassword(String email, String password) throws Exception {
+        return register("""
+                {"email": "%s", "password": "%s"}
+                """.formatted(email, password.replace("\\", "\\\\").replace("\"", "\\\"")));
     }
 
     private ResultActions register(String json) throws Exception {

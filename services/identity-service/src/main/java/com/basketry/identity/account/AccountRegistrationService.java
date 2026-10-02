@@ -1,8 +1,9 @@
 package com.basketry.identity.account;
 
 import com.basketry.identity.Emails;
+import com.basketry.identity.PasswordPolicy;
 import com.basketry.identity.admin.AdminAccountRepository;
-import java.nio.charset.StandardCharsets;
+import java.util.List;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -10,8 +11,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class AccountRegistrationService {
-
-    private static final int BCRYPT_MAX_PASSWORD_BYTES = 72;
 
     private final AccountRepository accounts;
     private final AdminAccountRepository adminAccounts;
@@ -31,8 +30,10 @@ public class AccountRegistrationService {
      */
     @Transactional
     public Account registerBuyer(String rawEmail, String password) {
-        if (password.getBytes(StandardCharsets.UTF_8).length > BCRYPT_MAX_PASSWORD_BYTES) {
-            throw new PasswordTooLongException();
+        // The authoritative policy check; the front-end's checklist is only a convenience.
+        List<String> violations = PasswordPolicy.violations(password);
+        if (!violations.isEmpty()) {
+            throw new WeakPasswordException(violations);
         }
 
         String email = Emails.normalize(rawEmail);

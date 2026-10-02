@@ -114,6 +114,64 @@ button[type='submit']:disabled {
   color: var(--text-muted);
 }
 
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rules {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.8125rem;
+}
+
+.rule {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rule-icon {
+  width: 1em;
+  text-align: center;
+}
+
+.rule-pending {
+  color: var(--text-muted);
+}
+
+.rule-met {
+  color: var(--notice);
+}
+
+.rule-failed {
+  color: var(--error);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.field-error {
+  font-size: 0.8125rem;
+  font-weight: 400;
+  color: var(--error);
+}
+
+input[aria-invalid='true'] {
+  border-color: var(--error);
+}
+
 .switch {
   margin: 20px 0 0;
   font-size: 0.875rem;
