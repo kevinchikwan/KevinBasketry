@@ -6,7 +6,7 @@ import Register from './screens/Register';
 type View =
   | { name: 'login'; notice?: string; email?: string }
   | { name: 'register' }
-  | { name: 'dashboard'; token: string };
+  | { name: 'dashboard'; token: string; email: string };
 
 /**
  * Three screens, switched by state rather than a router. The token lives only
@@ -22,7 +22,7 @@ export default function App() {
         <Login
           notice={view.notice}
           initialEmail={view.email}
-          onLoggedIn={(token) => setView({ name: 'dashboard', token })}
+          onLoggedIn={(token, email) => setView({ name: 'dashboard', token, email })}
           onGoToRegister={() => setView({ name: 'register' })}
         />
       )}
@@ -35,7 +35,7 @@ export default function App() {
         />
       )}
       {view.name === 'dashboard' && (
-        <Dashboard token={view.token} onLogOut={() => setView({ name: 'login' })} />
+        <Dashboard token={view.token} email={view.email} onLogOut={() => setView({ name: 'login' })} />
       )}
     </main>
   );

@@ -1,10 +1,11 @@
 import { useState, type FormEvent } from 'react';
 import { ApiError, login } from '../api';
+import AuthLayout from './AuthLayout';
 
 interface Props {
   notice?: string;
   initialEmail?: string;
-  onLoggedIn: (token: string) => void;
+  onLoggedIn: (token: string, email: string) => void;
   onGoToRegister: () => void;
 }
 
@@ -20,7 +21,7 @@ export default function Login({ notice, initialEmail = '', onLoggedIn, onGoToReg
     setSubmitting(true);
     try {
       const { accessToken } = await login(email, password);
-      onLoggedIn(accessToken);
+      onLoggedIn(accessToken, email);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Something went wrong.');
       setSubmitting(false);
@@ -28,8 +29,17 @@ export default function Login({ notice, initialEmail = '', onLoggedIn, onGoToReg
   }
 
   return (
-    <section className="card">
-      <h1>Log in</h1>
+    <AuthLayout
+      title="Log in to your account"
+      footer={
+        <>
+          New to Basketry?{' '}
+          <button type="button" className="link" onClick={onGoToRegister}>
+            Create an account
+          </button>
+        </>
+      }
+    >
       {notice && <p className="notice" role="status">{notice}</p>}
       <form onSubmit={handleSubmit}>
         <label>
@@ -37,6 +47,7 @@ export default function Login({ notice, initialEmail = '', onLoggedIn, onGoToReg
           <input
             type="email"
             autoComplete="username"
+            placeholder="you@example.com"
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
@@ -47,6 +58,7 @@ export default function Login({ notice, initialEmail = '', onLoggedIn, onGoToReg
           <input
             type="password"
             autoComplete="current-password"
+            placeholder="Your password"
             required
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -57,12 +69,6 @@ export default function Login({ notice, initialEmail = '', onLoggedIn, onGoToReg
           {submitting ? 'Logging in…' : 'Log in'}
         </button>
       </form>
-      <p className="switch">
-        No account?{' '}
-        <button type="button" className="link" onClick={onGoToRegister}>
-          Register
-        </button>
-      </p>
-    </section>
+    </AuthLayout>
   );
 }

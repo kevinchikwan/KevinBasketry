@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { ApiError, register } from '../api';
 import { meetsPolicy, PASSWORD_RULES } from '../passwordPolicy';
+import AuthLayout from './AuthLayout';
 
 interface Props {
   onRegistered: (email: string) => void;
@@ -44,14 +45,24 @@ export default function Register({ onRegistered, onGoToLogin }: Props) {
   }
 
   return (
-    <section className="card">
-      <h1>Create an account</h1>
+    <AuthLayout
+      title="Create your buyer account"
+      footer={
+        <>
+          Already have an account?{' '}
+          <button type="button" className="link" onClick={onGoToLogin}>
+            Log in
+          </button>
+        </>
+      }
+    >
       <form onSubmit={handleSubmit}>
         <label>
           Email
           <input
             type="email"
             autoComplete="username"
+            placeholder="you@example.com"
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
@@ -63,6 +74,7 @@ export default function Register({ onRegistered, onGoToLogin }: Props) {
             <input
               type="password"
               autoComplete="new-password"
+              placeholder="At least 8 characters"
               required
               value={password}
               aria-invalid={policyError}
@@ -97,6 +109,7 @@ export default function Register({ onRegistered, onGoToLogin }: Props) {
           <input
             type="password"
             autoComplete="new-password"
+            placeholder="Repeat your password"
             required
             value={confirmPassword}
             aria-invalid={mismatch}
@@ -114,15 +127,9 @@ export default function Register({ onRegistered, onGoToLogin }: Props) {
         </label>
         {error && <p className="error" role="alert">{error}</p>}
         <button type="submit" disabled={submitting}>
-          {submitting ? 'Creating account…' : 'Register'}
+          {submitting ? 'Creating account…' : 'Create account'}
         </button>
       </form>
-      <p className="switch">
-        Already registered?{' '}
-        <button type="button" className="link" onClick={onGoToLogin}>
-          Log in
-        </button>
-      </p>
-    </section>
+    </AuthLayout>
   );
 }
