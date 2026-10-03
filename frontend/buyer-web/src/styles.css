@@ -194,6 +194,51 @@ button[type='submit']:disabled {
   color: var(--text-muted);
 }
 
+/* Label beside (not wrapping) its input, laid out like a wrapping label. */
+.input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* The show/hide toggle sits inside the input's right edge; the input keeps its height. */
+.password-input {
+  position: relative;
+}
+
+.password-input input {
+  width: 100%;
+  padding-right: 40px;
+}
+
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.password-toggle:hover {
+  color: var(--text-muted);
+}
+
+.password-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+  color: var(--text-muted);
+}
+
 .field {
   display: flex;
   flex-direction: column;

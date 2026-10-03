@@ -146,6 +146,26 @@ describe('Register', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Password must contain a digit (0-9).');
   });
+
+  it('toggles Password and Confirm password visibility independently', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: 'Create an account' }));
+    const password = screen.getByLabelText('Password');
+    const confirm = screen.getByLabelText(/^Confirm password/);
+    const [passwordToggle, confirmToggle] = screen.getAllByRole('button', { name: 'Show password' });
+
+    await user.click(passwordToggle);
+    expect(password).toHaveAttribute('type', 'text');
+    expect(confirm).toHaveAttribute('type', 'password');
+    expect(passwordToggle).toHaveAccessibleName('Hide password');
+    expect(confirmToggle).toHaveAccessibleName('Show password');
+
+    await user.click(confirmToggle);
+    await user.click(passwordToggle);
+    expect(password).toHaveAttribute('type', 'password');
+    expect(confirm).toHaveAttribute('type', 'text');
+  });
 });
 
 function metRules(checklist: HTMLElement): string[] {
@@ -213,6 +233,24 @@ describe('Login', () => {
     await fillAndSubmit('buyer@example.com', 'correct-horse', /^Log in$/);
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not reach the server');
+  });
+
+  it('shows the typed password as plain text when toggled, and hides it again', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const password = screen.getByLabelText('Password');
+    await user.type(password, 'correct-horse');
+    expect(password).toHaveAttribute('type', 'password');
+
+    await user.click(screen.getByRole('button', { name: 'Show password' }));
+    expect(password).toHaveAttribute('type', 'text');
+    expect(password).toHaveValue('correct-horse');
+
+    // Keyboard-operable: Enter on the focused toggle hides it again.
+    expect(screen.getByRole('button', { name: 'Hide password' })).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(password).toHaveAttribute('type', 'password');
+    expect(screen.getByRole('button', { name: 'Show password' })).toBeInTheDocument();
   });
 
   it('Log out returns to Login and the dashboard is gone', async () => {

@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { ApiError, login } from '../api';
 import AuthLayout from './AuthLayout';
+import PasswordField from './PasswordField';
 
 interface Props {
   notice?: string;
@@ -53,17 +54,14 @@ export default function Login({ notice, initialEmail = '', onLoggedIn, onGoToReg
             onChange={(e) => setEmail(e.target.value)}
           />
         </label>
-        <label>
-          Password
-          <input
-            type="password"
-            autoComplete="current-password"
-            placeholder="Your password"
-            required
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-        </label>
+        <PasswordField
+          label="Password"
+          autoComplete="current-password"
+          placeholder="Your password"
+          required
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
         {error && <p className="error" role="alert">{error}</p>}
         <button type="submit" disabled={submitting}>
           {submitting ? 'Logging in…' : 'Log in'}

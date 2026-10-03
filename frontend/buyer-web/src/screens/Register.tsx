@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { ApiError, register } from '../api';
 import { meetsPolicy, PASSWORD_RULES } from '../passwordPolicy';
 import AuthLayout from './AuthLayout';
+import PasswordField from './PasswordField';
 
 interface Props {
   onRegistered: (email: string) => void;
@@ -69,22 +70,19 @@ export default function Register({ onRegistered, onGoToLogin }: Props) {
           />
         </label>
         <div className="field">
-          <label>
-            Password
-            <input
-              type="password"
-              autoComplete="new-password"
-              placeholder="At least 8 characters"
-              required
-              value={password}
-              aria-invalid={policyError}
-              aria-describedby="password-rules"
-              onChange={(e) => {
-                setPassword(e.target.value);
-                setMismatch(false);
-              }}
-            />
-          </label>
+          <PasswordField
+            label="Password"
+            autoComplete="new-password"
+            placeholder="At least 8 characters"
+            required
+            value={password}
+            aria-invalid={policyError}
+            aria-describedby="password-rules"
+            onChange={(e) => {
+              setPassword(e.target.value);
+              setMismatch(false);
+            }}
+          />
           <ul id="password-rules" className="rules" aria-label="Password requirements">
             {PASSWORD_RULES.map((rule) => {
               const met = rule.isMet(password);
@@ -104,27 +102,25 @@ export default function Register({ onRegistered, onGoToLogin }: Props) {
             </span>
           )}
         </div>
-        <label>
-          Confirm password
-          <input
-            type="password"
-            autoComplete="new-password"
-            placeholder="Repeat your password"
-            required
-            value={confirmPassword}
-            aria-invalid={mismatch}
-            aria-describedby={mismatch ? 'confirm-password-error' : undefined}
-            onChange={(e) => {
-              setConfirmPassword(e.target.value);
-              setMismatch(false);
-            }}
-          />
+        <PasswordField
+          label="Confirm password"
+          autoComplete="new-password"
+          placeholder="Repeat your password"
+          required
+          value={confirmPassword}
+          aria-invalid={mismatch}
+          aria-describedby={mismatch ? 'confirm-password-error' : undefined}
+          onChange={(e) => {
+            setConfirmPassword(e.target.value);
+            setMismatch(false);
+          }}
+        >
           {mismatch && (
             <span id="confirm-password-error" className="field-error" role="alert">
               Passwords do not match.
             </span>
           )}
-        </label>
+        </PasswordField>
         {error && <p className="error" role="alert">{error}</p>}
         <button type="submit" disabled={submitting}>
           {submitting ? 'Creating account…' : 'Create account'}
