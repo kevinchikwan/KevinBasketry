@@ -19,9 +19,8 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 /**
  * Deny by default: only the endpoints listed here are public, and each new
- * endpoint is opened explicitly as it is built. Bearer-token authentication
- * for protected endpoints is wired in with the first one (GET /accounts/{id});
- * until then every other request gets 401.
+ * endpoint is opened explicitly as it is built. Every other endpoint needs a
+ * valid bearer JWT; a request without one gets 401.
  */
 @Configuration
 public class SecurityConfig {
@@ -41,6 +40,9 @@ public class SecurityConfig {
                         // Lets error responses from public endpoints through instead of masking them as 401.
                         .requestMatchers("/error").permitAll()
                         .anyRequest().authenticated())
+                // Bearer JWTs, verified with the public key only (JwtKeyConfig.jwtDecoder), as other services will.
+                // Per-endpoint rules on the token's claims (e.g. GET /accounts/{id}) live with the endpoint.
+                .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()))
                 .exceptionHandling(ex -> ex.authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)));
         return http.build();
     }

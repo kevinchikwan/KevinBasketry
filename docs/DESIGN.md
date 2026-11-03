@@ -366,7 +366,13 @@ shape for review.
 - `GET /.well-known/jwks.json` (public — RS256 verification key, consumed
   by every other service's resource-server config)
 - `GET /accounts/{id}` (self or Admin; also used by `order-service`'s
-  live buyer-active check at checkout)
+  live buyer-active check at checkout). A token whose `capabilities`
+  contains `ADMIN` is always allowed and its `sub` is never compared
+  with the path: `Account` and `AdminAccount` ids are separate sequences
+  that both start at 1, so an admin's `sub` can equal a buyer's id. Any
+  other token is allowed only if its `sub` equals `{id}`, and gets 403
+  otherwise, decided before the lookup so it does not reveal whether the
+  account exists.
 - `PATCH /accounts/{id}/buyer-status` (Admin)
 - *(No merchant-status endpoint here — merchant activation happens only
   via `PATCH /merchants/{code}` on `merchant-service`; see Section 2.)*

@@ -24,6 +24,8 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-security")
     // NimbusJwtEncoder/Decoder and JWK types for RS256 tokens and the JWKS endpoint.
     implementation("org.springframework.security:spring-security-oauth2-jose")
+    // Bearer-token authentication for protected endpoints, using the JwtDecoder in JwtKeyConfig.
+    implementation("org.springframework.security:spring-security-oauth2-resource-server")
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     implementation("org.springframework.boot:spring-boot-starter-flyway")
     runtimeOnly("com.h2database:h2")
