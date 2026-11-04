@@ -362,7 +362,14 @@ shape for review.
   logged in from). One endpoint for everyone: it checks `Account` first,
   then falls back to `AdminAccount`. An `Account` with `buyerActive =
   false` is refused (Section 2, login rules)
-- `GET /accounts` (Admin, paginated — FR-A5)
+- `GET /accounts` (Admin, paginated — FR-A5). Lists every row in
+  `Account` (merchant-linked ones included); `AdminAccount` rows never
+  appear. `page` starts at 0 (default 0) and `size` is 1..100 (default
+  20); anything out of range is a 400, not silently clamped. Order is
+  fixed, `id` ascending. A page past the end is 200 with empty
+  `content`. Response: `{content, page, size, totalElements,
+  totalPages}`, where each item has the same fields as `GET
+  /accounts/{id}`.
 - `GET /.well-known/jwks.json` (public — RS256 verification key, consumed
   by every other service's resource-server config)
 - `GET /accounts/{id}` (self or Admin; also used by `order-service`'s
@@ -373,7 +380,15 @@ shape for review.
   other token is allowed only if its `sub` equals `{id}`, and gets 403
   otherwise, decided before the lookup so it does not reveal whether the
   account exists.
-- `PATCH /accounts/{id}/buyer-status` (Admin)
+- `PATCH /accounts/{id}/buyer-status` (Admin — FR-A6). Body
+  `{"buyerActive": true|false}`; a missing or null value is a 400, never
+  treated as `false`. Returns 200 with the updated account. The admin
+  check comes before the lookup, so only an admin can get a 404. Tokens
+  already issued are not revoked (Section 2, Tokens); checkout's live
+  check through `GET /accounts/{id}` sees the change at once.
+- For the Admin endpoints above, request validation runs before the
+  admin check: an authenticated non-admin with an invalid request gets
+  400, not 403. Nothing is changed or revealed either way.
 - *(No merchant-status endpoint here — merchant activation happens only
   via `PATCH /merchants/{code}` on `merchant-service`; see Section 2.)*
 - `POST /internal/accounts/merchant-link` (internal-only — called by

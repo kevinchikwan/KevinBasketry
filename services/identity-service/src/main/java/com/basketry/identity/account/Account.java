@@ -78,6 +78,14 @@ public class Account {
         return buyerActive;
     }
 
+    /**
+     * Admin activation/deactivation (FR-A6). Does not touch the merchant link,
+     * and does not revoke tokens already issued.
+     */
+    public void setBuyerActive(boolean buyerActive) {
+        this.buyerActive = buyerActive;
+    }
+
     public Long getMerchantId() {
         return merchantId;
     }
