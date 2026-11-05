@@ -436,7 +436,10 @@ shape for review.
   in the `X-Internal-Api-Key` header. `identity-service` reads it from
   `basketry.internal.api-key`, filled from the `BASKETRY_INTERNAL_API_KEY`
   environment variable (a Kubernetes Secret when deployed; never
-  committed). A key shorter than 32 characters fails startup. With no key
+  committed). Leading and trailing whitespace in the configured key (such
+  as the trailing newline a Secret often carries) is stripped before the
+  length check and the hash. A key shorter than 32 characters fails
+  startup. With no key
   set (e.g. local dev), the service starts, logs a warning, and refuses
   every internal call. Keys are compared in constant time (SHA-256 of
   both, then `MessageDigest.isEqual`). `/internal/**` has its own security

@@ -20,6 +20,8 @@ import org.springframework.stereotype.Component;
  *       /internal/** request is refused.</li>
  *   <li>Set but shorter than {@value #MIN_LENGTH} characters: startup fails.</li>
  * </ul>
+ *
+ * <p>Leading and trailing whitespace in the configured key is stripped first.
  */
 @Component
 public class InternalApiKey {
@@ -33,15 +35,19 @@ public class InternalApiKey {
     private final byte[] expectedDigest;
 
     public InternalApiKey(@Value("${basketry.internal.api-key:}") String configuredKey) {
-        if (configuredKey == null || configuredKey.isBlank()) {
+        // A Secret mounted or created from a file often carries a trailing newline;
+        // strip it before the length check and the hash, so it neither counts toward
+        // the minimum nor makes the real key fail to match.
+        String key = configuredKey == null ? "" : configuredKey.strip();
+        if (key.isEmpty()) {
             log.warn("basketry.internal.api-key is not set (env BASKETRY_INTERNAL_API_KEY); "
                     + "every /internal/** request will be refused.");
             this.expectedDigest = null;
-        } else if (configuredKey.length() < MIN_LENGTH) {
+        } else if (key.length() < MIN_LENGTH) {
             throw new IllegalStateException(
                     "basketry.internal.api-key must be at least " + MIN_LENGTH + " characters.");
         } else {
-            this.expectedDigest = sha256(configuredKey);
+            this.expectedDigest = sha256(key);
         }
     }
 

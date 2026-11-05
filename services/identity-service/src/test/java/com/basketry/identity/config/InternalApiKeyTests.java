@@ -58,6 +58,32 @@ class InternalApiKeyTests {
     }
 
     @Test
+    void configuredKeyWithTrailingNewlineMatchesTheKeyWithoutIt() {
+        InternalApiKey key = new InternalApiKey(VALID + "\n");
+
+        assertThat(key.matches(VALID)).isTrue();
+    }
+
+    @Test
+    void configuredKeyIsStrippedOnBothSides() {
+        InternalApiKey key = new InternalApiKey("  \t" + VALID + "\r\n");
+
+        assertThat(key.matches(VALID)).isTrue();
+    }
+
+    @Test
+    void thirtyOneCharactersPlusNewlineStillFailsTheMinimum() {
+        assertThatThrownBy(() -> new InternalApiKey("k".repeat(31) + "\n"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("at least 32");
+    }
+
+    @Test
+    void whitespaceOnlyKeyCountsAsUnset() {
+        assertThat(new InternalApiKey(" \n").matches("")).isFalse();
+    }
+
+    @Test
     void onlyTheExactKeyMatches() {
         InternalApiKey key = new InternalApiKey(VALID);
 
