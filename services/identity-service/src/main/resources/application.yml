@@ -18,12 +18,23 @@ spring:
   flyway:
     locations: classpath:db/migration
 
+  # A number like 1.5 sent for an integer field is a 400, not silently
+  # truncated (it would link merchantId 1 instead of rejecting the request).
+  jackson:
+    deserialization:
+      accept-float-as-int: false
+
   # Errors are returned as RFC 9457 problem details, never as stack traces.
   mvc:
     problemdetails:
       enabled: true
 
 basketry:
+  internal:
+    # Shared key for /internal/** (merchant-service -> merchant-link). Never
+    # committed: comes from the environment (a Kubernetes Secret when deployed).
+    # Unset = every /internal/** call is refused; set = at least 32 characters.
+    api-key: ${BASKETRY_INTERNAL_API_KEY:}
   cors:
     # Vite's default dev-server port. Widen this (comma-separated) once the
     # real front-end URLs exist (DESIGN.md Section 1).

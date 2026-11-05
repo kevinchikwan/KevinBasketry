@@ -78,7 +78,7 @@ Account
   buyerActive: boolean          -- the account-level login gate (see below)
   merchantId: nullable(Long)    -- reference to merchant-service's Merchant, if linked
   merchantActive: boolean       -- denormalized cache of merchant-service's Merchant.active;
-                                --   set once at link time, afterwards only by the event
+                                --   set to true when the link is first made, afterwards only by the event
   createdAt
 ```
 `merchantActive` is kept in sync by consuming `merchant.status.changed`,
@@ -87,10 +87,10 @@ the same pattern `catalog-service` uses. `merchant-service`'s
 deactivated only via `PATCH /merchants/{code}`, and the change reaches
 `identity-service` through the event. The one exception is the internal
 merchant-link call (Section 3), which sets `merchantId` and an initial
-`merchantActive = true` when the link is created, because a newly
+`merchantActive = true` when the link is first made, because a newly
 onboarded merchant starts active. That is a one-time seed, not a general
-write API. Seeding at link time also avoids a race in which a status
-event arrives before the link exists.
+write API: a repeat call changes nothing. Seeding at link time also
+avoids a race in which a status event arrives before the link exists.
 
 **Login rules:** `buyerActive` decides whether the account can log in at
 all. A deactivated buyer cannot log in anywhere, including the Merchant
@@ -389,37 +389,72 @@ shape for review.
 - For the Admin endpoints above, request validation runs before the
   admin check: an authenticated non-admin with an invalid request gets
   400, not 403. Nothing is changed or revealed either way.
+- Everywhere in this service, a number with a decimal (e.g. `1.5`) sent
+  for a whole-number JSON field is a 400, never silently truncated.
 - *(No merchant-status endpoint here — merchant activation happens only
   via `PATCH /merchants/{code}` on `merchant-service`; see Section 2.)*
 - `POST /internal/accounts/merchant-link` (internal-only — called by
   `merchant-service` during onboarding, not exposed to the public Buyer
-  or Merchant front-ends). The body carries `email`, `merchantId`, and
-  `initialPassword` (used only if a new account has to be created; it must
-  meet the password policy, REQUIREMENTS Section 4). It is
-  an **upsert by email**:
-  - If an account with that email exists, the call links the merchant
-    and keeps the existing password.
-  - If not, it creates a new account with the initial password.
-  - Either way it sets `merchantId` and `merchantActive = true` (the
-    one-time seed, Section 2).
-  - It rejects an account that is already linked to a different
-    merchant (at most one merchant per account, REQUIREMENTS Section 4).
-  - It rejects an existing account with `buyerActive = false`, with an
-    error telling Admin to reactivate the buyer account first. Otherwise
-    it would create a merchant who can never log in.
-  - It rejects an email that already belongs to an `AdminAccount`.
+  or Merchant front-ends). The body carries `email` (normalized to
+  lowercase), `merchantId` (positive), and an optional `initialPassword`.
+  It is an **upsert by email**. Checks run in this order, and the first
+  that applies decides the answer:
+  1. Email belongs to an `AdminAccount`: 409 `EMAIL_BELONGS_TO_ADMIN`.
+  2. `merchantId` is already linked to a different account: 409
+     `MERCHANT_ALREADY_LINKED_TO_OTHER_ACCOUNT`. A merchant has at most
+     one account (unique index on `merchant_id`, NULLs allowed). A repeat
+     call by the account that already holds it is not a conflict.
+  3. No account with that email: create one with `initialPassword`, linked
+     (**201**, `outcome: CREATED`). `initialPassword` is required here
+     (400 if missing) and must meet the password policy (400 naming every
+     failed rule, REQUIREMENTS Section 4).
+  4. Account already linked to a different merchant: 409
+     `ACCOUNT_LINKED_TO_OTHER_MERCHANT` (at most one merchant per
+     account, REQUIREMENTS Section 4).
+  5. Account already linked to this merchant: no change at all, not even
+     `merchantActive` (**200**, `outcome: ALREADY_LINKED`). This comes
+     before step 6, so repeating an earlier successful call is always 200,
+     even if the buyer has been deactivated since.
+  6. `buyerActive = false`: 409 `BUYER_DEACTIVATED`, telling Admin to
+     reactivate the buyer account first. Otherwise it would create a
+     merchant who can never log in.
+  7. Link the existing account and keep its password (**200**, `outcome:
+     LINKED`).
 
-  Secured by a **shared API key** stored in a Kubernetes Secret, never a
-  user JWT. Optionally, a k3s NetworkPolicy can also restrict which pods
-  can reach it, but the API key is the primary control. There is no
-  OAuth client-credentials flow.
+  For an existing account, `initialPassword` is ignored completely (not
+  checked, not stored). `merchantId` and `merchantActive = true` are set
+  only when the link is first made (the one-time seed, Section 2). An
+  invalid body (bad or missing `email`, missing or non-positive
+  `merchantId`, malformed JSON) is a 400. 409s are problem details with a
+  `code` property. A success body has the `GET /accounts/{id}` fields plus
+  `outcome`, never a password or hash. If a concurrent write (a
+  registration of the same email, or a link of the same `merchantId`)
+  lands between the checks and the write, a unique constraint rejects it
+  and the call is retried once, which then answers from the new state.
+
+  Secured by a **shared API key**, never a user JWT. The caller sends it
+  in the `X-Internal-Api-Key` header. `identity-service` reads it from
+  `basketry.internal.api-key`, filled from the `BASKETRY_INTERNAL_API_KEY`
+  environment variable (a Kubernetes Secret when deployed; never
+  committed). A key shorter than 32 characters fails startup. With no key
+  set (e.g. local dev), the service starts, logs a warning, and refuses
+  every internal call. Keys are compared in constant time (SHA-256 of
+  both, then `MessageDigest.isEqual`). `/internal/**` has its own security
+  chain that never reads the `Authorization` header and sends no CORS
+  headers: a missing key, a wrong key, or a user JWT (even an admin's)
+  without the key all get the same bare 401. The Ingress must never route
+  `/internal/**` externally (Section 7). Optionally, a k3s NetworkPolicy
+  can also restrict which pods can reach it, but the API key is the
+  primary control. There is no OAuth client-credentials flow.
 - *(No endpoint for creating an Admin account exists anywhere in this
   service, or any other. See Section 2 — Admin is seeded via migration.)*
 
 **merchant-service**
 - `POST /merchants` (Admin — onboarding; the form includes the login
   email and, for a new account, an initial password. Calls
-  identity-service's internal merchant-link upsert)
+  identity-service's internal merchant-link upsert). The link call must
+  be retried safely if it fails or times out, and any 2xx answer from it
+  counts as success.
 - `GET /merchants`, `GET /merchants/{code}`
 - `PATCH /merchants/{code}` (Admin — commission rate, active flag; the
   only way to change merchant active status — publishes `merchant.status.changed`)
@@ -594,7 +629,13 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   in an interview.
 - Ingress routes `app.`, `merchant.`, and `admin.` subdomains to their
   respective frontend pods; an API gateway (or Ingress path rules) routes
-  `/api/<service>` paths to the right backend pod.
+  `/api/<service>` paths to the right backend pod. The Ingress must
+  never route `/internal/**` from outside the cluster; those paths are
+  reached only service-to-service (Section 3, merchant-link).
+- `BASKETRY_INTERNAL_API_KEY` (at least 32 characters) must be set in
+  `identity-service`'s and `merchant-service`'s Kubernetes Secret before
+  deployment. Without it, `identity-service` still starts but refuses
+  every internal call, so merchant onboarding fails.
 - Each service's own datastore (H2 in early development, Postgres for
   the deployed version) runs as its own pod with a persistent volume —
   acceptable for a single-node demo cluster; a real multi-node setup

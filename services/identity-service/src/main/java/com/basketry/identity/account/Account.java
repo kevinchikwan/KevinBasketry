@@ -8,6 +8,7 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 /**
  * A buyer/merchant login (DESIGN.md Section 2, identity-service).
@@ -59,7 +60,9 @@ public class Account {
         this.buyerActive = true;
         this.merchantId = null;
         this.merchantActive = false;
-        this.createdAt = Instant.now();
+        // Truncated to what the database stores, so a response built from this object
+        // matches what a later read of the row returns.
+        this.createdAt = Instant.now().truncatedTo(ChronoUnit.MICROS);
     }
 
     public Long getId() {
@@ -84,6 +87,16 @@ public class Account {
      */
     public void setBuyerActive(boolean buyerActive) {
         this.buyerActive = buyerActive;
+    }
+
+    /**
+     * Makes the merchant link (merchant-link upsert, DESIGN.md Section 3).
+     * {@code merchantActive = true} is set only here, when the link is first
+     * made; afterwards only the merchant.status.changed event changes it.
+     */
+    public void linkMerchant(long merchantId) {
+        this.merchantId = merchantId;
+        this.merchantActive = true;
     }
 
     public Long getMerchantId() {

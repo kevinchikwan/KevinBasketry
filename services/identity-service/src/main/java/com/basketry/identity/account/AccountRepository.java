@@ -10,4 +10,7 @@ public interface AccountRepository extends JpaRepository<Account, Long> {
 
     /** Expects an already-normalized (lowercase) email. */
     Optional<Account> findByEmail(String email);
+
+    /** At most one account per merchant (unique index, V3 migration). */
+    Optional<Account> findByMerchantId(Long merchantId);
 }
