@@ -1,0 +1,47 @@
+server:
+  # Fixed port map in services/README.md.
+  port: 8082
+
+spring:
+  application:
+    name: merchant-service
+
+  # Early development: in-memory H2 in PostgreSQL mode (DESIGN.md Section 7).
+  # Swapped for Postgres in the deployed version.
+  datasource:
+    url: jdbc:h2:mem:merchant;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    username: sa
+    password: ""
+
+  # Flyway owns the schema; Hibernate only checks that the entities match it.
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+
+  flyway:
+    locations: classpath:db/migration
+
+  # Errors are returned as RFC 9457 problem details, never as stack traces.
+  mvc:
+    problemdetails:
+      enabled: true
+
+basketry:
+  identity:
+    # identity-service: JWKS for token verification, and the internal merchant-link call.
+    base-url: ${BASKETRY_IDENTITY_URL:http://localhost:8080}
+    connect-timeout: 2s
+    read-timeout: 5s
+    # Pause before the one automatic retry of a merchant-link call that timed out or got a 5xx.
+    retry-delay: 200ms
+  internal:
+    # Shared key sent to identity-service's /internal/**. Never committed: comes
+    # from the environment (a Kubernetes Secret when deployed), the same variable
+    # identity-service reads. Unset = onboarding is refused with 503; set = at
+    # least 32 characters.
+    api-key: ${BASKETRY_INTERNAL_API_KEY:}
+  cors:
+    # Vite's default dev-server port. Widen this (comma-separated) once the
+    # Admin console and Merchant portal exist (DESIGN.md Section 1).
+    allowed-origins: http://localhost:5173

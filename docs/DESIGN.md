@@ -136,13 +136,47 @@ hide an admin account.
 ### merchant-service
 ```
 Merchant
-  id (PK)
+  id (PK)                       -- from the sequence merchant_id_seq, taken before the row is built
   merchantCode (unique, human-readable, e.g. MCH-001)
   name, category
   kycVerified: boolean
   active: boolean
   commissionRate: BigDecimal    -- percentage, e.g. 5.00
+  loginEmail (unique)           -- the login identity-service links to this merchant; stored lowercase
+  accountLinkStatus: PENDING | LINKED
+  createdAt
 ```
+- **`merchantCode`** is `MCH-` followed by the id, zero-padded to at least
+  three digits: `MCH-001` … `MCH-999`, then `MCH-1000`. The id is taken from
+  the sequence before the row is built, so the code is part of the one
+  `INSERT`, never set by a later update. It never changes. A unique
+  constraint backs it up, and gaps after a rolled-back insert are fine.
+  Lookups by code are exact (case-sensitive).
+- **Field rules** (a violation is a 400):
+  - `name`: required, trimmed, 1–100 characters, not unique.
+  - `category`: required, trimmed, 1–50 characters, free text.
+  - `commissionRate`: required JSON number (a string is a 400),
+    0.00–100.00 inclusive, at most 2 decimal places. More decimals is a
+    400, never rounded.
+  - `kycVerified`: required at onboarding, with no default.
+  - `active`: always `true` at onboarding and not part of the request.
+    identity-service seeds `merchantActive = true` when it links the login
+    (Section 2, identity-service).
+- **`kycVerified`** can be changed later through `PATCH /merchants/{code}`.
+  It is independent of `active`: either can be true without the other, and
+  changing it publishes nothing.
+- **`loginEmail`** is unique. One account holds at most one merchant, so two
+  merchants with the same login could never both be linked. It is set at
+  onboarding and **changes only when a link attempt succeeds** (the merchant
+  becomes `LINKED`). A failed retry with a different email leaves the stored
+  one as it was.
+- **`accountLinkStatus`**: onboarding saves the merchant as `PENDING`
+  before it calls identity-service, because the link needs the merchant's
+  id. Any 2xx from the link call makes it `LINKED`, and it never goes back.
+  While a merchant is `PENDING`, changing `active` is refused with a 409
+  (Stage B, when `active` becomes editable). Otherwise identity-service's
+  `merchantActive = true` seed at link time would silently undo a
+  deactivation made before the link.
 
 ### catalog-service
 ```
@@ -453,14 +487,118 @@ shape for review.
   service, or any other. See Section 2 — Admin is seeded via migration.)*
 
 **merchant-service**
-- `POST /merchants` (Admin — onboarding; the form includes the login
-  email and, for a new account, an initial password. Calls
-  identity-service's internal merchant-link upsert). The link call must
-  be retried safely if it fails or times out, and any 2xx answer from it
-  counts as success.
-- `GET /merchants`, `GET /merchants/{code}`
-- `PATCH /merchants/{code}` (Admin — commission rate, active flag; the
-  only way to change merchant active status — publishes `merchant.status.changed`)
+
+Every endpoint needs a bearer JWT from identity-service. Tokens are verified
+with the keys at identity-service's `GET /.well-known/jwks.json` (Section 2,
+Tokens).
+- The JWKS is fetched on first use, not at startup, so the two services
+  can start in either order.
+- Keys are cached. A token whose `kid` is not cached makes the service
+  fetch the JWKS again. In local dev, identity-service makes a new key on
+  every restart: new tokens work at once, and tokens signed with the old
+  key get 401.
+- If the JWKS cannot be fetched (identity-service down, timing out or
+  answering with an error) and the token's key is not cached, the answer
+  is **503** (problem detail), not 401 and not Spring's default 500. The
+  token may be valid, and a 401 would make the front-end log the user out.
+- A malformed, expired or tampered token, or a key identity-service does
+  not publish, is 401.
+- A key that is already cached keeps working while the JWKS is unreachable.
+
+As in identity-service, request validation runs before the admin check:
+an authenticated non-admin with an invalid request gets 400, not 403.
+Every error is a problem detail, and a 409 or 503 that a client may need
+to tell apart carries a `code` property.
+
+- `POST /merchants` (Admin — FR-A1). Body: `name`, `category`,
+  `kycVerified`, `commissionRate` (rules in Section 2), `loginEmail`, and
+  an optional `initialPassword`. The password is only needed when no
+  account exists for the email. It is passed to identity-service and never
+  stored or logged. Any other field, including `active`, is a 400 that
+  names it (the same rule as `PATCH`), so Admin never believes a value was
+  applied when it was not. A new merchant always starts active.
+  1. If `BASKETRY_INTERNAL_API_KEY` is unset: 503
+     `INTERNAL_API_KEY_NOT_CONFIGURED`, before anything is saved.
+  2. If another merchant already has this `loginEmail` (case-insensitive):
+     409 `LOGIN_EMAIL_IN_USE`, with that merchant's `merchantCode`, so Admin
+     can retry it instead of creating a duplicate.
+  3. The merchant is saved as `PENDING` and committed. Then
+     identity-service's internal merchant-link is called, outside any
+     database transaction.
+  4. The answer is always **201** with a `Location` header once the
+     merchant is saved, whatever the link result. The body has the
+     merchant's fields plus exactly one of:
+     - `accountOutcome` when the link succeeded (any 2xx) and the merchant
+       is `LINKED`. `CREATED`: a new account was created with the initial
+       password. `LINKED`: an existing account was linked, and its password
+       was kept. `ALREADY_LINKED`: the account was already linked to this
+       merchant, and nothing changed. This can also be the answer when an
+       earlier attempt timed out after identity-service had already created
+       the account, so the initial password may have been set by that
+       earlier attempt.
+     - `accountLinkError {code, detail, violations}` when the merchant stays
+       `PENDING`:
+
+       | `code` | Cause | `detail` shown to Admin |
+       |---|---|---|
+       | `EMAIL_BELONGS_TO_ADMIN` | identity 409 | This email is an admin login. Use a different email. |
+       | `ACCOUNT_LINKED_TO_OTHER_MERCHANT` | identity 409 | This login already runs another merchant. Use a different email. |
+       | `BUYER_DEACTIVATED` | identity 409 | This buyer account is deactivated. Reactivate it first (Accounts page), then retry. |
+       | `MERCHANT_ALREADY_LINKED_TO_OTHER_ACCOUNT` | identity 409; only possible if an earlier attempt that timed out actually succeeded with another email | An earlier attempt already linked this merchant to a different login. Retry with the original email. |
+       | `WEAK_PASSWORD` | identity 400 with `violations` | identity-service's detail; `violations` lists every failed rule |
+       | `INITIAL_PASSWORD_REQUIRED` | identity 400, no password sent | No account exists for this email, so an initial password is required. |
+       | `IDENTITY_UNAVAILABLE` | timeout, connection failure or 5xx, twice | Merchant saved; login not linked yet. Retry. |
+       | `IDENTITY_AUTH_FAILED` | identity 401 (the API keys differ); logged as an error | Fix the configuration, then retry. |
+       | `LINK_REJECTED` | any other 4xx or an unknown 409 code; logged as an error | identity-service rejected the request. |
+- `POST /merchants/{code}/account-link` (Admin). Retries the link of a
+  `PENDING` merchant with the **same `merchantId`**, so a repeat after a
+  timeout that actually succeeded gets `ALREADY_LINKED` and nothing is
+  created twice. The body is optional: `email` defaults to the stored
+  `loginEmail`, and `initialPassword` is needed only if no account exists
+  for the email. The stored `loginEmail` changes only if this attempt
+  succeeds (Section 2).
+  - 404 for an unknown code (only an admin can get it).
+  - 409 `MERCHANT_ALREADY_LINKED` if the merchant is already `LINKED`.
+  - 503 `INTERNAL_API_KEY_NOT_CONFIGURED`.
+  - 409 `LOGIN_EMAIL_IN_USE` if another merchant has the email.
+  - Otherwise **200**, with the same body as `POST /merchants`.
+- `GET /merchants` (Admin — FR-A2). Same paging as `GET /accounts`: `page`
+  from 0 (default 0), `size` 1..100 (default 20), anything out of range is
+  a 400, fixed `id`-ascending order, a page past the end is 200 with empty
+  `content`. Response: `{content, page, size, totalElements, totalPages}`,
+  where each item has the fields of `GET /merchants/{code}`.
+- `GET /merchants/{code}` (Admin, or the merchant itself: a `MERCHANT`
+  token whose `merchantId` claim is this merchant's id). Fields: `id`,
+  `merchantCode`, `name`, `category`, `kycVerified`, `active`,
+  `commissionRate`, `loginEmail`, `accountLinkStatus`, `createdAt`.
+  Ownership can only be checked after the lookup, so a non-admin gets 403
+  both for someone else's merchant and for a code that does not exist.
+  Only an admin can get a 404.
+- `PATCH /merchants/{code}` (Admin — FR-A4). Accepts `commissionRate` and/or
+  `kycVerified`, and at least one is required. An explicit `null` is a 400,
+  and so is any other field, named in the error, so Admin never believes a
+  change was applied when it was not. Returns 200 with the merchant; values
+  that do not change are a 200 no-op. *Stage B* adds `active`: this is the
+  only way to change merchant active status. It publishes
+  `merchant.status.changed` only when the value actually changes, and it is
+  refused with a 409 while the merchant is `PENDING` (Section 2).
+
+**Calling identity-service.** merchant-service uses Spring `RestClient` on
+the JDK HttpClient.
+- Base URL: `basketry.identity.base-url`, from the `BASKETRY_IDENTITY_URL`
+  environment variable (default `http://localhost:8080`). The JWKS fetch
+  uses the same base URL.
+- Timeouts: connect 2 s, read 5 s, for both merchant-link and the JWKS
+  fetch.
+- Retry: a merchant-link call that fails with a timeout, a connection
+  error or a 5xx is retried once after 200 ms. This is safe because the
+  call is idempotent. A 4xx is never retried.
+- API key: sent in `X-Internal-Api-Key`, from `basketry.internal.api-key`
+  (`BASKETRY_INTERNAL_API_KEY`), with the same rules as identity-service:
+  whitespace is stripped, fewer than 32 characters fails startup, and unset
+  means a warning and 503 on onboarding.
+- Neither the key nor the initial password is ever logged, and request
+  objects mask the password in `toString`.
 
 **catalog-service**
 - `GET /products?merchantCode=`
@@ -561,7 +699,7 @@ overselling race window this design exists to close.
 
 | Topic | Producer | Consumers | Payload (key fields) |
 |---|---|---|---|
-| `merchant.status.changed` | merchant-service | catalog-service, identity-service | merchantId, active |
+| `merchant.status.changed` | merchant-service | catalog-service, identity-service | merchantId, merchantCode, active, version |
 | `order.merchant-charge.requested` | order-service | payment-service | orderId, merchantId, amount, cardNumber *(real system: tokenized payment-method reference, not a raw card number)* |
 | `order.merchant.charged` | payment-service | order-service | orderId, merchantId, transactionRef |
 | `order.merchant.declined` | payment-service | order-service | orderId, merchantId, reasonCode |
@@ -582,6 +720,20 @@ reserve/release request topics, which keeps its responsibility narrow:
 react to explicit requests, not infer action from a general-purpose
 success event meant for other services.
 
+**`merchant.status.changed` (built in Stage B of merchant-service):**
+- **`version`** increases by one with every status change of that merchant,
+  and the Kafka key is `merchantId`. A consumer ignores an event whose
+  `version` is not newer than the one it has already applied. That covers
+  duplicates and out-of-order delivery.
+- **`merchantCode`** is carried because catalog-service filters products
+  by code.
+- **Publishing uses a transactional outbox.** The outbox row is written in
+  the same database transaction as the `PATCH`, and a scheduled relay
+  publishes it and marks it sent. Delivery is at least once. A plain
+  publish after the commit could lose the event if the publish failed,
+  leaving the cached `merchantActive` wrong for good. Kafka transactions
+  cannot include the database, and CDC (Debezium) is too heavy here.
+
 Each event carries the `orderId` (and `merchantId`/`productId` where
 relevant) as a natural idempotency key — consumers must treat redelivery
 as a no-op if they've already processed that combination, since Kafka's
@@ -597,6 +749,17 @@ at-least-once delivery means duplicates are expected, not exceptional.
   (transactional outbox pattern) — worth doing properly rather than
   skipping, since it's a genuinely common real-world gap; decide before
   writing `order-service`'s checkout handler.
+- `order-service` needs the commission rate in force at order time, and
+  nothing provides it yet. `merchant-service` holds only the current rate,
+  so a rate changed later must not alter the commission of an earlier order.
+- Tokens carry no `iss` or `aud` claim, so a service accepts any token
+  signed by identity-service's key. Accepted for now.
+- Known limitation, accepted for now: one admin retries a merchant's link
+  with a new email while another admin onboards a different merchant with
+  that same email at the same moment. identity-service can end up linked to
+  the first merchant while merchant-service keeps it `PENDING` with its old
+  email (the unique `loginEmail` refuses the update). There is no delete
+  endpoint to clean up.
 
 ## 7. Technology stack & deployment
 
@@ -638,7 +801,9 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
 - `BASKETRY_INTERNAL_API_KEY` (at least 32 characters) must be set in
   `identity-service`'s and `merchant-service`'s Kubernetes Secret before
   deployment. Without it, `identity-service` still starts but refuses
-  every internal call, so merchant onboarding fails.
+  every internal call, so merchant onboarding fails. `merchant-service`
+  also needs `BASKETRY_IDENTITY_URL` (in a ConfigMap; not a secret) to reach
+  identity-service for the JWKS and for merchant-link.
 - Each service's own datastore (H2 in early development, Postgres for
   the deployed version) runs as its own pod with a persistent volume —
   acceptable for a single-node demo cluster; a real multi-node setup
