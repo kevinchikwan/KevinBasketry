@@ -32,13 +32,31 @@ docker compose down            # stop; also deletes the Kafka data
 ```
 
 Services run from IntelliJ connect to `localhost:9092`, and other containers
-on the Compose network to `kafka:29092`. No test needs Docker, and
-merchant-service also runs without Kafka: `PATCH` still works and the events
-wait in its outbox until the broker is back.
+on the Compose network to `kafka:29092`. No test needs Docker, and both services
+also run without Kafka. merchant-service: `PATCH` still works and the events wait
+in its outbox until the broker is back. identity-service: login and every other
+request still work, and the status consumer catches up once the broker is back.
 
 ## Restarting with H2
 
-With in-memory H2, restarting only merchant-service resets its merchant ids and
-versions, while Kafka and a running consumer keep the old ones. A consumer would
-then ignore the new events, because their versions look old. So restart both
-services and run `docker compose down` together. This goes away with Postgres.
+With in-memory H2, restart **all** services and run `docker compose down`
+together, whichever one you meant to restart. Restarting only merchant-service
+resets its merchant ids and versions, while Kafka and a running consumer keep the
+old ones, so the consumer would ignore new events because their versions look
+old. Restarting only identity-service loses every account, while merchant-service
+still shows its merchants as `LINKED`, and they cannot be linked again. This goes
+away with Postgres.
+
+## End-to-end check
+
+`scripts/e2e-merchant-status.ps1` runs the whole `merchant.status.changed` chain
+on a real broker and real processes. From PowerShell at the repo root, with
+Docker running:
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\e2e-merchant-status.ps1
+```
+
+It needs ports 8080, 8082 and 9092 free, and refuses to start otherwise. It stops
+only what it started, and its exit codes are listed at the top of the script.
+Service logs go to `build\e2e`.

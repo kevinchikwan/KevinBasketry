@@ -28,10 +28,14 @@ dependencies {
     implementation("org.springframework.security:spring-security-oauth2-resource-server")
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     implementation("org.springframework.boot:spring-boot-starter-flyway")
+    // Consumes merchant.status.changed, and publishes what cannot be applied to its dead-letter topic.
+    implementation("org.springframework.boot:spring-boot-starter-kafka")
     runtimeOnly("com.h2database:h2")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
+    // Embedded KRaft broker, so no test needs Docker.
+    testImplementation("org.springframework.boot:spring-boot-starter-kafka-test")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

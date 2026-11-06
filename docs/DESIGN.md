@@ -79,6 +79,7 @@ Account
   merchantId: nullable(Long)    -- reference to merchant-service's Merchant, if linked
   merchantActive: boolean       -- denormalized cache of merchant-service's Merchant.active;
                                 --   set to true when the link is first made, afterwards only by the event
+  merchantStatusVersion: long   -- version of the last event applied (Section 5); 0 until the first one
   createdAt
 ```
 `merchantActive` is kept in sync by consuming `merchant.status.changed`,
@@ -89,8 +90,23 @@ deactivated only via `PATCH /merchants/{code}`, and the change reaches
 merchant-link call (Section 3), which sets `merchantId` and an initial
 `merchantActive = true` when the link is first made, because a newly
 onboarded merchant starts active. That is a one-time seed, not a general
-write API: a repeat call changes nothing. Seeding at link time also
-avoids a race in which a status event arrives before the link exists.
+write API: a repeat call changes nothing. A status event cannot arrive
+before the link exists, because merchant-service refuses to change `active`
+with a 409 while the merchant is `PENDING` (Section 2, merchant-service).
+
+**Writers of an `Account` row.** Each writer owns separate columns, and
+`@DynamicUpdate` makes an update write only the columns it changed, so
+overlapping writers cannot undo each other:
+- The buyer-status `PATCH` owns `buyer_active`.
+- The merchant link and the status consumer own `merchant_id`,
+  `merchant_active` and `merchant_status_version`. They never overlap: the
+  consumer's update matches a row only once its link is committed, and a link
+  is made only once.
+
+**Any new writer of a column that another writer already owns must take a row
+lock**, because `@DynamicUpdate` does not protect two writers of one column.
+merchant-service uses a row lock instead (Section 2, merchant-service) because
+its writers do share columns.
 
 **Login rules:** `buyerActive` decides whether the account can log in at
 all. A deactivated buyer cannot log in anywhere, including the Merchant
@@ -756,19 +772,20 @@ reserve/release request topics, which keeps its responsibility narrow:
 react to explicit requests, not infer action from a general-purpose
 success event meant for other services.
 
-**`merchant.status.changed`** (merchant-service Stage B1 builds the producer;
-the consumers come later):
+**`merchant.status.changed`** (merchant-service publishes it; identity-service
+consumes it, see below; catalog-service comes later):
 - **`version`** increases by one with every status change of that merchant,
   and the Kafka key is `merchantId`, as a string. A consumer ignores an event
   whose `version` is not newer than the one it has already applied. That
   covers duplicates and out-of-order delivery.
 - **No event is published at onboarding.** A consumer that has not seen a
   merchant yet assumes it is active at version 0, which is how every merchant
-  starts, until the first event arrives.
+  starts, until the first event arrives. identity-service has its own rule for
+  an event with no linked account, below.
 - **`merchantCode`** is carried because catalog-service filters products
   by code.
-- **Topic:** 3 partitions, replication factor 1, default retention. The
-  partition count is fixed, because changing it moves keys between partitions
+- **Topic:** 3 partitions, replication factor 1, default retention (7 days; see
+  Section 6). The partition count is fixed, because changing it moves keys between partitions
   and breaks per-merchant order. merchant-service creates the topic itself, on
   first publish and not at startup, so startup never waits for Kafka. The
   broker does not auto-create topics.
@@ -821,6 +838,59 @@ the consumers come later):
   timeout counts as not sent, and the broker address comes from
   `BASKETRY_KAFKA_BOOTSTRAP_SERVERS` (default `localhost:9092`).
 
+**The identity-service consumer** keeps `Account.merchantActive` in step
+(Section 2):
+- **Applying an event** is one atomic statement with no read first:
+  `UPDATE account SET merchant_active = ?, merchant_status_version = ? WHERE
+  merchant_id = ? AND merchant_status_version < ?`. Duplicates and older events
+  match no row. Gaps are not detected: an event carries the full state, so
+  version 3 applies after version 1, and a late version 2 is then ignored. An
+  event changes only those two columns, whatever `buyerActive` is.
+- **No linked account:** log a WARN and skip the event, committing its offset.
+  merchant-service refuses to change `active` before the link, so this happens
+  only after data loss, such as an H2 restart. Retrying would block the
+  partition forever, and there is nothing to repair from a dead letter.
+- **Login** follows `merchantActive` from the next login on. Tokens already
+  issued stay valid until they expire (Section 2, Tokens).
+- **Settings:**
+  - Group id `identity-service`, one listener thread: events are rare, and the
+    version check would keep more threads correct anyway.
+  - `auto.offset.reset=earliest`, so events published before the first start are
+    read. It also recovers if the topic is recreated.
+  - Kafka's auto-commit is off. The container commits after each record is
+    applied, so a crash between the two only redelivers it, and the version
+    check ignores that.
+- **Kafka is not needed to start.** The listener connects in the background and
+  keeps trying, and identity-service serves requests meanwhile. The topic belongs
+  to merchant-service and appears on the first status change, so a missing topic
+  is normal. `metadata.max.age.ms` of 10 s is how soon the consumer notices it
+  (the client's default is 5 minutes), and the consumer never creates it.
+- **A record that cannot be applied:**
+
+  | Case | Action |
+  |---|---|
+  | Malformed JSON, no value, a missing or invalid field | Dead-letter topic, then the next record |
+  | Unknown `schemaVersion` (checked first) | Dead-letter topic, then the next record |
+  | Any unexpected exception | Dead-letter topic, then the next record |
+  | Database error | Retry with no limit, waiting 1, 2, 4 … up to 60 s; the offset is not committed |
+
+  So one bad record never blocks a partition, and a database outage never drops
+  an event; it holds up the records behind it until the database is back, which
+  is right, because they would fail too. Bad records are kept rather than
+  skipped, because skipping one could lose a deactivation for good.
+- **Parsing is strict.** The value is read with the service's own Jackson mapper
+  (Section 3), so `"active":"false"` or `1` is a bad record, never converted.
+  Only `schemaVersion`, `merchantId`, `active` and `version` are required, and
+  unknown fields are ignored.
+- **Dead-letter topic:** `merchant.status.changed.DLT`, 3 partitions, keyed like
+  the original, with the failure in Spring Kafka's standard headers. identity-service
+  owns it and creates it before its first publish, not at startup, because the
+  broker does not auto-create topics. If the publish fails, the record is tried
+  again, not dropped. Nothing consumes the topic: replaying it by hand after a
+  fix is safe, because of the version check.
+- **Switch:** `basketry.merchant-status.consumer.enabled`, off in tests, which
+  call the handler directly unless a test class turns the listener on.
+
 The `order.*` events carry the `orderId` (and `merchantId`/`productId` where
 relevant) as a natural idempotency key — consumers must treat redelivery
 as a no-op if they've already processed that combination, since Kafka's
@@ -848,6 +918,15 @@ at-least-once delivery means duplicates are expected, not exceptional.
   the first merchant while merchant-service keeps it `PENDING` with its old
   email (the unique `loginEmail` refuses the update). There is no delete
   endpoint to clean up.
+- Known limitation, accepted for now: `merchant.status.changed` keeps the
+  default retention of 7 days. A consumer that is down for longer loses the
+  events it missed, and its cached `merchantActive` stays wrong. **Fix before
+  deployment:** turn on topic compaction, which keeps the latest event of every
+  `merchantId` for good.
+- Known limitation, accepted for now: the merchant link can read
+  `buyerActive = true` just before a deactivation commits, which leaves a
+  deactivated buyer linked. Both changes survive and login is still refused
+  (Section 2), so Admin can reactivate the buyer when wanted.
 
 ## 7. Technology stack & deployment
 
@@ -891,7 +970,7 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   deployment. Without it, `identity-service` still starts but refuses
   every internal call, so merchant onboarding fails. `merchant-service`
   also needs `BASKETRY_IDENTITY_URL` (in a ConfigMap; not a secret) to reach
-  identity-service for the JWKS and for merchant-link, and
+  identity-service for the JWKS and for merchant-link. Both services need
   `BASKETRY_KAFKA_BOOTSTRAP_SERVERS` (also a ConfigMap) to reach Kafka.
 - Each service's own datastore (H2 in early development, Postgres for
   the deployed version) runs as its own pod with a persistent volume —
@@ -912,14 +991,17 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   Compose too.
   For now Compose holds Kafka only, and the services run from IntelliJ on
   in-memory H2. The rest joins as each piece is built.
-- No automated test needs Docker: merchant-service's Kafka tests use an
-  embedded KRaft broker.
-- **Restarting with H2.** Restarting only merchant-service resets its merchant
-  ids and versions, and loses any `PENDING` outbox rows, while Kafka and a
-  running consumer keep the old ones. A new merchant 1 at version 1 would then
-  be ignored by a consumer that already applied version 5 of the old merchant
-  1. So restart both services and run `docker compose down` together. This
-  goes away with Postgres.
+- No automated test needs Docker: both services' Kafka tests use an embedded
+  KRaft broker. `scripts/e2e-merchant-status.ps1` is the one check that does: it
+  runs the whole status chain on a real broker and real processes.
+- **Restarting with H2.** Restart **all** services and run `docker compose
+  down` together, whichever one you meant to restart. Restarting only
+  merchant-service resets its merchant ids and versions, and loses any `PENDING`
+  outbox rows, while Kafka and a running consumer keep the old ones: a new
+  merchant 1 at version 1 would be ignored by a consumer that already applied
+  version 5 of the old merchant 1. Restarting only identity-service loses every
+  account, while merchant-service still shows its merchants as `LINKED`, and
+  there is no way to link them again. This goes away with Postgres.
 
 ### What this deliberately does not include
 

@@ -15,6 +15,11 @@ services are being implemented one at a time. This README will be updated
 as each piece lands — it's describing where the project is, not presenting
 unfinished work as done.
 
+Built so far: `identity-service` and `merchant-service`, including the
+`merchant.status.changed` event between them, from the outbox to the consumer.
+[`services/README.md`](services/README.md) has the status of every service and
+how to run the end-to-end check of that event.
+
 ## Start here
 
 - [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) — functional and

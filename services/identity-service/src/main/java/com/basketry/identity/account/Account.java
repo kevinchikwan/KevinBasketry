@@ -9,6 +9,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import org.hibernate.annotations.DynamicUpdate;
 
 /**
  * A buyer/merchant login (DESIGN.md Section 2, identity-service).
@@ -19,10 +20,25 @@ import java.time.temporal.ChronoUnit;
  *       {@code merchantActive} is a cached copy of merchant-service's
  *       {@code Merchant.active}, seeded once at link time and afterwards
  *       changed only by the {@code merchant.status.changed} event.</li>
+ *   <li>{@code merchantStatusVersion} is the version of the last event applied.</li>
  * </ul>
+ *
+ * <p>Each writer owns separate columns, and {@code @DynamicUpdate} makes an
+ * update write only the columns it changed, so overlapping writers cannot undo
+ * each other (DESIGN.md Section 2):
+ * <ul>
+ *   <li>buyer-status PATCH: {@code buyer_active}</li>
+ *   <li>merchant link and the status consumer: {@code merchant_id},
+ *       {@code merchant_active}, {@code merchant_status_version}. They never
+ *       overlap: the consumer's update matches a row only once its link is
+ *       committed, and a link is made only once.</li>
+ * </ul>
+ * Any new writer of a column that another writer already owns must take a row
+ * lock, because this annotation does not protect two writers of one column.
  */
 @Entity
 @Table(name = "account")
+@DynamicUpdate
 public class Account {
 
     @Id
@@ -45,6 +61,10 @@ public class Account {
 
     @Column(name = "merchant_active", nullable = false)
     private boolean merchantActive;
+
+    /** Changed only by {@link AccountRepository#applyMerchantStatus} after the link. */
+    @Column(name = "merchant_status_version", nullable = false)
+    private long merchantStatusVersion;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
@@ -92,11 +112,13 @@ public class Account {
     /**
      * Makes the merchant link (merchant-link upsert, DESIGN.md Section 3).
      * {@code merchantActive = true} is set only here, when the link is first
-     * made; afterwards only the merchant.status.changed event changes it.
+     * made; afterwards only the merchant.status.changed event changes it. A
+     * newly onboarded merchant is active at version 0 (DESIGN.md Section 5).
      */
     public void linkMerchant(long merchantId) {
         this.merchantId = merchantId;
         this.merchantActive = true;
+        this.merchantStatusVersion = 0;
     }
 
     public Long getMerchantId() {
@@ -105,6 +127,10 @@ public class Account {
 
     public boolean isMerchantActive() {
         return merchantActive;
+    }
+
+    public long getMerchantStatusVersion() {
+        return merchantStatusVersion;
     }
 
     public Instant getCreatedAt() {
