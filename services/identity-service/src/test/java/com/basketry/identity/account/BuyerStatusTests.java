@@ -11,6 +11,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -157,6 +159,28 @@ class BuyerStatusTests {
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
                 .andExpect(status().isBadRequest());
         assertThat(buyerActiveInDb(alice.getId())).isTrue();
+    }
+
+    /**
+     * Only a real JSON boolean counts, the same rule as merchant-service: each
+     * of these is refused, and neither value is applied. Both directions are
+     * tried, from a buyer who is active and from one who is not, so a coerced
+     * value could not go unnoticed by matching the stored one.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"\"false\"", "\"true\"", "\"FALSE\"", "\"\"", "0", "1", "0.0", "1.0", "[true]"})
+    void onlyARealJsonBooleanIsAccepted(String value) throws Exception {
+        String token = adminToken();
+        String body = "{\"buyerActive\": " + value + "}";
+
+        patchStatus(alice.getId(), token, body)
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON));
+        assertThat(buyerActiveInDb(alice.getId())).isTrue();
+
+        jdbc.update("UPDATE account SET buyer_active = FALSE WHERE id = ?", alice.getId());
+        patchStatus(alice.getId(), token, body).andExpect(status().isBadRequest());
+        assertThat(buyerActiveInDb(alice.getId())).isFalse();
     }
 
     // --- refused -----------------------------------------------------------

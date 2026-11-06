@@ -355,7 +355,7 @@ class MerchantLinkTests {
 
     @Test
     void invalidMerchantIdIs400() throws Exception {
-        for (String merchantId : List.of("null", "0", "-1", "\"seven\"", "1.5")) {
+        for (String merchantId : List.of("null", "0", "-1", "\"seven\"", "\"42\"", "1.5")) {
             link("""
                     {"email": "merchant@example.com", "merchantId": %s, "initialPassword": "%s"}
                     """.formatted(merchantId, INITIAL_PASSWORD))

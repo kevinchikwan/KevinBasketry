@@ -439,7 +439,9 @@ shape for review.
   account exists.
 - `PATCH /accounts/{id}/buyer-status` (Admin — FR-A6). Body
   `{"buyerActive": true|false}`; a missing or null value is a 400, never
-  treated as `false`. Returns 200 with the updated account. The admin
+  treated as `false`, and so is anything but a real JSON boolean (the
+  string `"false"` or the number `0`), never converted. Returns 200 with
+  the updated account. The admin
   check comes before the lookup, so only an admin can get a 404. Tokens
   already issued are not revoked (Section 2, Tokens); checkout's live
   check through `GET /accounts/{id}` sees the change at once.
@@ -448,6 +450,9 @@ shape for review.
   400, not 403. Nothing is changed or revealed either way.
 - Everywhere in this service, a number with a decimal (e.g. `1.5`) sent
   for a whole-number JSON field is a 400, never silently truncated.
+  Likewise a boolean or number field takes only that JSON type: `"false"`
+  or `0` for a boolean and `"42"` for a number are 400s, never converted.
+  One global Jackson setting covers every request body, present and future.
 - *(No merchant-status endpoint here — merchant activation happens only
   via `PATCH /merchants/{code}` on `merchant-service`; see Section 2.)*
 - `POST /internal/accounts/merchant-link` (internal-only — called by

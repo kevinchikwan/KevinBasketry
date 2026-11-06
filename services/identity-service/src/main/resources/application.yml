@@ -20,9 +20,13 @@ spring:
 
   # A number like 1.5 sent for an integer field is a 400, not silently
   # truncated (it would link merchantId 1 instead of rejecting the request).
+  # A boolean or number field takes only that JSON type: "false" or 0 for a
+  # boolean and "42" for a number are 400s, never converted.
   jackson:
     deserialization:
       accept-float-as-int: false
+    mapper:
+      allow-coercion-of-scalars: false
 
   # Errors are returned as RFC 9457 problem details, never as stack traces.
   mvc:
