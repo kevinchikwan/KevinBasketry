@@ -28,3 +28,6 @@ replay_pid*
 build/
 # *.jar is ignored above, but the wrapper jar must be committed
 !gradle/wrapper/gradle-wrapper.jar
+
+# IntelliJ
+.idea/
