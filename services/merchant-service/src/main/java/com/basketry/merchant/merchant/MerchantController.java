@@ -33,10 +33,13 @@ public class MerchantController {
     static final int MAX_PAGE_SIZE = 100;
 
     private final MerchantOnboardingService onboarding;
+    private final MerchantUpdateService updates;
     private final MerchantRepository merchants;
 
-    public MerchantController(MerchantOnboardingService onboarding, MerchantRepository merchants) {
+    public MerchantController(MerchantOnboardingService onboarding, MerchantUpdateService updates,
+                              MerchantRepository merchants) {
         this.onboarding = onboarding;
+        this.updates = updates;
         this.merchants = merchants;
     }
 
@@ -101,19 +104,16 @@ public class MerchantController {
     }
 
     /**
-     * Admin only (FR-A4): commissionRate and/or kycVerified. kycVerified is
-     * independent of active and publishes nothing. The active flag is not
-     * accepted yet: it arrives with the merchant.status.changed event (Stage B).
+     * Admin only (FR-A3, FR-A4): commissionRate, kycVerified and/or active, applied
+     * together or not at all. Only a real change of active publishes
+     * merchant.status.changed; kycVerified is independent of it.
      */
     @PatchMapping("/merchants/{code}")
-    @Transactional
     public MerchantResponse update(@PathVariable String code,
                                    @Valid @RequestBody UpdateMerchantRequest request,
                                    @AuthenticationPrincipal Jwt jwt) {
         request.checkShape();
         TokenCapabilities.requireAdmin(jwt);
-        Merchant merchant = merchants.findByMerchantCode(code).orElseThrow(MerchantNotFoundException::new);
-        request.applyTo(merchant);
-        return MerchantResponse.from(merchant);
+        return updates.update(code, request);
     }
 }

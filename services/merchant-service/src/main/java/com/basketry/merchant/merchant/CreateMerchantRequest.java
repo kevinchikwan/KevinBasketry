@@ -34,6 +34,7 @@ public record CreateMerchantRequest(
         String category,
 
         @NotNull
+        @JsonDeserialize(using = StrictBooleanDeserializer.class)
         Boolean kycVerified,
 
         @NotNull

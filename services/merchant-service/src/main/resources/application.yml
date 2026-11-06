@@ -22,6 +22,26 @@ spring:
   flyway:
     locations: classpath:db/migration
 
+  # merchant.status.changed (DESIGN.md Section 5). A send either finishes or fails
+  # within these limits, so a broker outage cannot hang the relay.
+  kafka:
+    bootstrap-servers: ${BASKETRY_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+    admin:
+      # Startup never touches Kafka: the publisher creates the topic on first use,
+      # so the service can start before the broker does.
+      auto-create: false
+      operation-timeout: 3s
+      properties:
+        request.timeout.ms: 3000
+        default.api.timeout.ms: 3000
+
   # Errors are returned as RFC 9457 problem details, never as stack traces.
   mvc:
     problemdetails:
@@ -41,6 +61,20 @@ basketry:
     # identity-service reads. Unset = onboarding is refused with 503; set = at
     # least 32 characters.
     api-key: ${BASKETRY_INTERNAL_API_KEY:}
+  outbox:
+    topic: merchant.status.changed
+    # Fixed: changing the count later moves keys between partitions and breaks per-merchant order.
+    partitions: 3
+    replication-factor: 1
+    # Longer than max.block.ms plus delivery.timeout.ms, so the producer gives the answer first.
+    send-timeout: 16s
+    relay:
+      enabled: true
+      interval: 1s
+      batch-size: 100
+      # After a failed pass: wait 1s, 2s, 4s ... up to 60s. A success resets it.
+      backoff-initial: 1s
+      backoff-max: 60s
   cors:
     # Vite's default dev-server port. Widen this (comma-separated) once the
     # Admin console and Merchant portal exist (DESIGN.md Section 1).

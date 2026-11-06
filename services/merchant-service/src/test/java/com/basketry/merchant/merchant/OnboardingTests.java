@@ -338,6 +338,8 @@ class OnboardingTests extends MerchantServiceTestBase {
                 invalid("category over 50", body -> body.put("category", "x".repeat(51))),
                 invalid("missing kycVerified", body -> body.remove("kycVerified")),
                 invalid("null kycVerified", body -> body.put("kycVerified", null)),
+                invalid("string kycVerified", body -> body.put("kycVerified", "false")),
+                invalid("number kycVerified", body -> body.put("kycVerified", 1)),
                 invalid("missing commissionRate", body -> body.remove("commissionRate")),
                 invalid("negative commissionRate", body -> body.put("commissionRate", new BigDecimal("-0.01"))),
                 invalid("commissionRate over 100", body -> body.put("commissionRate", new BigDecimal("100.01"))),

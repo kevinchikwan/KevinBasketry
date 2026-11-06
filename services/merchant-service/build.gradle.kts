@@ -29,10 +29,14 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-restclient")
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     implementation("org.springframework.boot:spring-boot-starter-flyway")
+    // Publishes merchant.status.changed from the outbox relay.
+    implementation("org.springframework.boot:spring-boot-starter-kafka")
     runtimeOnly("com.h2database:h2")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
+    // Embedded KRaft broker, so no test needs Docker.
+    testImplementation("org.springframework.boot:spring-boot-starter-kafka-test")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

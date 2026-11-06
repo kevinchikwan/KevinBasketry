@@ -16,9 +16,9 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.ResultActions;
 
 /**
- * PATCH /merchants/{code} in Stage A: Admin changes commissionRate and/or
- * kycVerified. At least one is required; nulls and unknown fields (including
- * {@code active}, until Stage B) are a 400.
+ * PATCH /merchants/{code}: Admin changes commissionRate and/or kycVerified. At
+ * least one field is required; nulls, unknown fields and booleans that are not
+ * real JSON booleans are a 400. MerchantStatusTests covers {@code active}.
  */
 class UpdateMerchantTests extends MerchantServiceTestBase {
 
@@ -44,6 +44,7 @@ class UpdateMerchantTests extends MerchantServiceTestBase {
         assertThat(after.getCommissionRate()).isEqualByComparingTo("5.00");
         assertThat(after.isKycVerified()).isTrue();
         assertThat(after.isActive()).isTrue();
+        assertThat(after.getStatusVersion()).isZero();
     }
 
     @Test
@@ -96,14 +97,22 @@ class UpdateMerchantTests extends MerchantServiceTestBase {
             "{\"commissionRate\":null}",
             "{\"kycVerified\":null}",
             "{\"commissionRate\":6,\"kycVerified\":null}",
-            "{\"active\":false}",
-            "{\"commissionRate\":6,\"active\":false}",
+            "{\"active\":null}",
+            "{\"active\":\"false\"}",
+            "{\"active\":\"true\"}",
+            "{\"active\":0}",
+            "{\"active\":1}",
+            "{\"commissionRate\":6,\"active\":\"false\"}",
             "{\"name\":\"Renamed\"}",
             "{\"commissionRate\":-0.01}",
             "{\"commissionRate\":100.01}",
             "{\"commissionRate\":5.005}",
             "{\"commissionRate\":\"6.00\"}",
             "{\"kycVerified\":\"maybe\"}",
+            "{\"kycVerified\":\"false\"}",
+            "{\"kycVerified\":\"true\"}",
+            "{\"kycVerified\":0}",
+            "{\"kycVerified\":1}",
             "{\"commissionRate\":",
             "[]"})
     void invalidBodyIs400EvenForNonAdminsAndNothingChanges(String body) throws Exception {
@@ -115,9 +124,11 @@ class UpdateMerchantTests extends MerchantServiceTestBase {
 
     @Test
     void unknownFieldsAreNamedInTheError() throws Exception {
-        update(TestTokens.admin(), merchant.getMerchantCode(), "{\"active\":false,\"name\":\"x\"}")
+        update(TestTokens.admin(), merchant.getMerchantCode(), "{\"category\":\"y\",\"active\":false,\"name\":\"x\"}")
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.detail").value(Matchers.containsString("active, name")));
+                .andExpect(jsonPath("$.detail").value(Matchers.containsString("category, name")));
+
+        assertUnchanged();
     }
 
     @Test

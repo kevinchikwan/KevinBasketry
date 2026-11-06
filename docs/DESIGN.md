@@ -37,7 +37,7 @@ the owning service's API):
 |---|---|---|
 | `identity-service` | Accounts, auth, buyer/merchant linkage | consumes `merchant.status.changed` (cached `merchantActive`); otherwise foundational — everything else validates tokens issued here |
 | `catalog-service` | Products, categories | `merchant-service` (merchant active/inactive), `inventory-service`, Redis (read-through cache) |
-| `merchant-service` | Merchant profile, onboarding, commission rate, KYC | `identity-service` (creating merchant login) |
+| `merchant-service` | Merchant profile, onboarding, commission rate, KYC | `identity-service` (creating merchant login); publishes `merchant.status.changed` (Section 5) |
 | `inventory-service` | Stock counts | consumes stock reserve/release request events (Section 5), Redis (atomic pre-check) |
 | `payment-service` | Deterministic authorization mock (card-number lookup table) | — (no outbound dependencies) |
 | `order-service` | Checkout orchestration, saga coordination (no cart state — cart is client-side) | `identity-service` (live buyer-active check at checkout), `catalog-service`, `promotion-service`, publishes/consumes checkout events |
@@ -141,10 +141,20 @@ Merchant
   name, category
   kycVerified: boolean
   active: boolean
+  statusVersion: long           -- counts changes of active; starts at 0; the event's `version`
   commissionRate: BigDecimal    -- percentage, e.g. 5.00
   loginEmail (unique)           -- the login identity-service links to this merchant; stored lowercase
   accountLinkStatus: PENDING | LINKED
   createdAt
+
+OutboxEvent                     -- one row per status change (Section 5)
+  id (PK)                       -- from outbox_event_id_seq; the relay's publish order
+  eventId (unique)              -- UUID, also in the payload; for tracing
+  merchantId, version           -- unique together; merchantId is the Kafka key
+  payload                       -- the exact JSON to publish
+  status: PENDING | SENT
+  attempts, lastError           -- failed publish attempts so far, and the latest reason
+  createdAt, sentAt
 ```
 - **`merchantCode`** is `MCH-` followed by the id, zero-padded to at least
   three digits: `MCH-001` … `MCH-999`, then `MCH-1000`. The id is taken from
@@ -158,7 +168,9 @@ Merchant
   - `commissionRate`: required JSON number (a string is a 400),
     0.00–100.00 inclusive, at most 2 decimal places. More decimals is a
     400, never rounded.
-  - `kycVerified`: required at onboarding, with no default.
+  - `kycVerified`: required at onboarding, with no default. A real JSON
+    boolean: the string `"false"` or the number `0` is a 400, never
+    converted. The same goes for `kycVerified` and `active` in `PATCH`.
   - `active`: always `true` at onboarding and not part of the request.
     identity-service seeds `merchantActive = true` when it links the login
     (Section 2, identity-service).
@@ -173,10 +185,21 @@ Merchant
 - **`accountLinkStatus`**: onboarding saves the merchant as `PENDING`
   before it calls identity-service, because the link needs the merchant's
   id. Any 2xx from the link call makes it `LINKED`, and it never goes back.
-  While a merchant is `PENDING`, changing `active` is refused with a 409
-  (Stage B, when `active` becomes editable). Otherwise identity-service's
+  While a merchant is `PENDING`, a `PATCH` that contains `active` is refused
+  with a 409, even if the value is unchanged. Otherwise identity-service's
   `merchantActive = true` seed at link time would silently undo a
   deactivation made before the link.
+- **`statusVersion`** increases by one with every change of `active`, in the
+  same transaction as the outbox row. It starts at 0, the state of a newly
+  onboarded merchant, so the first change is version 1. Commission and KYC
+  changes do not move it, which is why it is not a JPA `@Version`.
+- **Row lock.** Hibernate writes every column of a changed row, so two
+  overlapping updates from plain reads would let the later one put back what
+  the earlier one changed: a commission `PATCH` could undo a deactivation with
+  no event, or turn `LINKED` back into `PENDING`. So `PATCH` and the step that
+  marks a merchant `LINKED` read the row with `SELECT ... FOR UPDATE`. The lock
+  is held only in those short transactions, **never during the HTTP call to
+  identity-service**.
 
 ### catalog-service
 ```
@@ -574,14 +597,22 @@ to tell apart carries a `code` property.
   Ownership can only be checked after the lookup, so a non-admin gets 403
   both for someone else's merchant and for a code that does not exist.
   Only an admin can get a 404.
-- `PATCH /merchants/{code}` (Admin — FR-A4). Accepts `commissionRate` and/or
-  `kycVerified`, and at least one is required. An explicit `null` is a 400,
-  and so is any other field, named in the error, so Admin never believes a
-  change was applied when it was not. Returns 200 with the merchant; values
-  that do not change are a 200 no-op. *Stage B* adds `active`: this is the
-  only way to change merchant active status. It publishes
-  `merchant.status.changed` only when the value actually changes, and it is
-  refused with a 409 while the merchant is `PENDING` (Section 2).
+- `PATCH /merchants/{code}` (Admin — FR-A3, FR-A4). Accepts `commissionRate`,
+  `kycVerified` and `active`, and at least one is required. An explicit
+  `null` is a 400, and so is any other field, named in the error, so Admin
+  never believes a change was applied when it was not. Returns 200 with the
+  merchant (no `version` field); values that do not change are a 200 no-op.
+  The fields can be combined and are applied in one transaction: all of them
+  or none.
+  - This is the only way to change `active`. Only a real change bumps
+    `statusVersion` and writes the `merchant.status.changed` outbox row
+    (Section 5). The `PATCH` never waits for Kafka and succeeds while it is
+    down.
+  - Checks run in this order: the body (400), admin (403), the lookup (404),
+    then 409 `MERCHANT_NOT_LINKED` if the body contains `active` and the
+    merchant is `PENDING` (Section 2), even with an unchanged value. The 409
+    applies nothing, not even the other fields. Without `active`, a `PENDING`
+    merchant can still be changed.
 
 **Calling identity-service.** merchant-service uses Spring `RestClient` on
 the JDK HttpClient.
@@ -699,7 +730,7 @@ overselling race window this design exists to close.
 
 | Topic | Producer | Consumers | Payload (key fields) |
 |---|---|---|---|
-| `merchant.status.changed` | merchant-service | catalog-service, identity-service | merchantId, merchantCode, active, version |
+| `merchant.status.changed` | merchant-service | catalog-service, identity-service | schemaVersion, eventId, merchantId, merchantCode, active, version, occurredAt |
 | `order.merchant-charge.requested` | order-service | payment-service | orderId, merchantId, amount, cardNumber *(real system: tokenized payment-method reference, not a raw card number)* |
 | `order.merchant.charged` | payment-service | order-service | orderId, merchantId, transactionRef |
 | `order.merchant.declined` | payment-service | order-service | orderId, merchantId, reasonCode |
@@ -720,24 +751,76 @@ reserve/release request topics, which keeps its responsibility narrow:
 react to explicit requests, not infer action from a general-purpose
 success event meant for other services.
 
-**`merchant.status.changed` (built in Stage B of merchant-service):**
+**`merchant.status.changed`** (merchant-service Stage B1 builds the producer;
+the consumers come later):
 - **`version`** increases by one with every status change of that merchant,
-  and the Kafka key is `merchantId`. A consumer ignores an event whose
-  `version` is not newer than the one it has already applied. That covers
-  duplicates and out-of-order delivery.
+  and the Kafka key is `merchantId`, as a string. A consumer ignores an event
+  whose `version` is not newer than the one it has already applied. That
+  covers duplicates and out-of-order delivery.
+- **No event is published at onboarding.** A consumer that has not seen a
+  merchant yet assumes it is active at version 0, which is how every merchant
+  starts, until the first event arrives.
 - **`merchantCode`** is carried because catalog-service filters products
   by code.
+- **Topic:** 3 partitions, replication factor 1, default retention. The
+  partition count is fixed, because changing it moves keys between partitions
+  and breaks per-merchant order. merchant-service creates the topic itself, on
+  first publish and not at startup, so startup never waits for Kafka. The
+  broker does not auto-create topics.
+  After a publish failure the publisher rechecks the topic, so a broker
+  restarted without its data (no volume) gets the topic created again.
+- **Value:** JSON, sent as a plain string with no Java type header. The payload
+  is built once, in the `PATCH` transaction, and stored in the outbox row, so a
+  resend is byte-identical:
+  ```json
+  {"schemaVersion":1, "eventId":"<uuid>", "merchantId":42, "merchantCode":"MCH-042",
+   "active":false, "version":3, "occurredAt":"2026-11-06T01:20:22.864Z"}
+  ```
+  `schemaVersion` lets a consumer detect a format change. `eventId` is for
+  tracing only: duplicates are dropped by `version`, not by `eventId`.
 - **Publishing uses a transactional outbox.** The outbox row is written in
   the same database transaction as the `PATCH`, and a scheduled relay
   publishes it and marks it sent. Delivery is at least once. A plain
   publish after the commit could lose the event if the publish failed,
   leaving the cached `merchantActive` wrong for good. Kafka transactions
   cannot include the database, and CDC (Debezium) is too heavy here.
+- **The relay** runs every second (fixed delay, so passes never overlap) and
+  takes up to 100 `PENDING` rows in `id` order. It sends one row, waits for
+  the acknowledgement, then marks it `SENT` in a short transaction. No
+  transaction is open during a send.
+  - **Order.** The merchant's row lock (Section 2) means one merchant's rows get
+    ids in version order, and one key always goes to one partition.
+  - **On a failure the pass stops**, so a later event of the same merchant
+    cannot overtake the one that failed. This holds up the other merchants'
+    events too, which is acceptable because the only expected failure is the
+    broker being unreachable, and that affects every row alike. Revisit this if
+    a single row could ever fail on its own, because that row would then block
+    all the others.
+  - **Kafka down.** The row stays `PENDING`, with `attempts` and `lastError`
+    updated, and the relay waits 1, 2, 4 … up to 60 s between attempts, resetting
+    on success. There is no `FAILED` status, because giving up on a row would
+    lose the event. Nothing is lost while the database keeps the row (see the
+    H2 note in Section 7).
+  - **Crash after the send, before the mark.** The row is sent again, the same
+    bytes, and consumers drop it by `version`.
+  - **Two instances.** There is no leader lock. A rolling update can briefly
+    run two; both may publish a row, which is only a duplicate, and a mark
+    applies only to a `PENDING` row. `SKIP LOCKED` is deliberately not used:
+    it would let one instance send a merchant's next event while another still
+    holds the previous one.
+  - **Sent rows are kept** as an audit trail, and the `(status, id)` index
+    keeps the relay's query cheap. Status changes are rare admin actions, so
+    there is no cleanup job yet.
+- **Producer:** `acks=all`, idempotence on, `max.block.ms` 5 s,
+  `request.timeout.ms` 5 s, `delivery.timeout.ms` 10 s. Any send failure or
+  timeout counts as not sent, and the broker address comes from
+  `BASKETRY_KAFKA_BOOTSTRAP_SERVERS` (default `localhost:9092`).
 
-Each event carries the `orderId` (and `merchantId`/`productId` where
+The `order.*` events carry the `orderId` (and `merchantId`/`productId` where
 relevant) as a natural idempotency key — consumers must treat redelivery
 as a no-op if they've already processed that combination, since Kafka's
 at-least-once delivery means duplicates are expected, not exceptional.
+`merchant.status.changed` uses `version` for the same purpose.
 
 ## 6. Open questions for implementation
 
@@ -784,7 +867,7 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
 - One EC2 instance (free-tier eligible for the first 12 months of an AWS
   account) runs a single-node **k3s** cluster — a lightweight, fully
   conformant Kubernetes distribution, not a toy subset. All 9 backend
-  services, Kafka (and Zookeeper/KRaft), and the 3 frontend apps run as
+  services, Kafka (in KRaft mode, no Zookeeper), and the 3 frontend apps run as
   pods on this one node.
 - This is a deliberate trade-off, recorded here so it isn't mistaken for
   an oversight: a *single-node* cluster gives none of Kubernetes' real
@@ -803,12 +886,35 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   deployment. Without it, `identity-service` still starts but refuses
   every internal call, so merchant onboarding fails. `merchant-service`
   also needs `BASKETRY_IDENTITY_URL` (in a ConfigMap; not a secret) to reach
-  identity-service for the JWKS and for merchant-link.
+  identity-service for the JWKS and for merchant-link, and
+  `BASKETRY_KAFKA_BOOTSTRAP_SERVERS` (also a ConfigMap) to reach Kafka.
 - Each service's own datastore (H2 in early development, Postgres for
   the deployed version) runs as its own pod with a persistent volume —
   acceptable for a single-node demo cluster; a real multi-node setup
   would use managed RDS instances instead, which is worth naming as the
   production-grade alternative even though it's not what's built here.
+
+### Local development
+
+- The root `docker-compose.yml` runs one Kafka broker in KRaft mode
+  (`apache/kafka:4.2.2`, the same 4.2 line as the client). Start it with
+  `docker compose up -d --wait` and stop it with `docker compose down`. Services
+  run from IntelliJ reach it at `localhost:9092`; other containers on the
+  Compose network reach it at `kafka:29092`. It has no volume, so `down` deletes
+  its data.
+- **Interim:** REQUIREMENTS asks for the whole system to start with one
+  documented command, and the stack table above puts Redis and Postgres in
+  Compose too.
+  For now Compose holds Kafka only, and the services run from IntelliJ on
+  in-memory H2. The rest joins as each piece is built.
+- No automated test needs Docker: merchant-service's Kafka tests use an
+  embedded KRaft broker.
+- **Restarting with H2.** Restarting only merchant-service resets its merchant
+  ids and versions, and loses any `PENDING` outbox rows, while Kafka and a
+  running consumer keep the old ones. A new merchant 1 at version 1 would then
+  be ignored by a consumer that already applied version 5 of the old merchant
+  1. So restart both services and run `docker compose down` together. This
+  goes away with Postgres.
 
 ### What this deliberately does not include
 

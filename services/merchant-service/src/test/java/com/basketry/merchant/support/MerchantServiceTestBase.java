@@ -8,6 +8,7 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 import com.basketry.merchant.identityclient.InternalApiKey;
 import com.basketry.merchant.merchant.Merchant;
 import com.basketry.merchant.merchant.MerchantRepository;
+import com.basketry.merchant.outbox.OutboxRepository;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -23,6 +24,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.http.client.MockClientHttpRequest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -30,7 +32,9 @@ import org.springframework.test.web.client.ExpectedCount;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.test.web.client.ResponseActions;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -64,12 +68,19 @@ public abstract class MerchantServiceTestBase {
     @Autowired
     protected MerchantRepository merchants;
 
+    @Autowired
+    protected OutboxRepository outbox;
+
+    @Autowired
+    protected JdbcTemplate jdbc;
+
     /** The bodies of the merchant-link requests sent in this test, in order. */
     protected final List<String> linkRequests = new ArrayList<>();
 
     @BeforeEach
     void resetShared() {
         identity.reset();
+        outbox.deleteAll();
         merchants.deleteAll();
     }
 
@@ -120,6 +131,21 @@ public abstract class MerchantServiceTestBase {
     protected Merchant savePending(String loginEmail) {
         return merchants.save(new Merchant(merchants.nextId(), "Corner Shop", "Groceries", true,
                 new BigDecimal("5.00"), loginEmail, Instant.now()));
+    }
+
+    /** A merchant whose login is linked, the only state in which active can change. */
+    protected Merchant saveLinked(String loginEmail) {
+        long id = savePending(loginEmail).getId();
+        jdbc.update("UPDATE merchant SET account_link_status = 'LINKED' WHERE id = ?", id);
+        return merchants.findById(id).orElseThrow();
+    }
+
+    /** PATCH /merchants/{code} as Admin. */
+    protected ResultActions patchAsAdmin(Merchant merchant, String body) throws Exception {
+        return mockMvc.perform(bearer(MockMvcRequestBuilders.patch("/merchants/{code}", merchant.getMerchantCode()),
+                        TestTokens.admin())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body));
     }
 
     protected static String conflict(String code) {

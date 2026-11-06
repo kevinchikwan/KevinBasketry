@@ -38,6 +38,12 @@ public class Merchant implements Persistable<Long> {
 
     private boolean active;
 
+    /**
+     * Counts changes of {@code active}, published as the event's {@code version}.
+     * Not a JPA {@code @Version}: commission and KYC changes must not move it.
+     */
+    private long statusVersion;
+
     private BigDecimal commissionRate;
 
     private String loginEmail;
@@ -90,6 +96,20 @@ public class Merchant implements Persistable<Long> {
         this.loginEmail = linkedEmail;
     }
 
+    /**
+     * The only way to change {@code active}, so the version cannot be forgotten.
+     *
+     * @return true if the value changed; the caller then writes the outbox row
+     */
+    boolean changeActive(boolean active) {
+        if (this.active == active) {
+            return false;
+        }
+        this.active = active;
+        this.statusVersion++;
+        return true;
+    }
+
     void setCommissionRate(BigDecimal commissionRate) {
         this.commissionRate = commissionRate.setScale(2);
     }
@@ -132,6 +152,10 @@ public class Merchant implements Persistable<Long> {
 
     public boolean isActive() {
         return active;
+    }
+
+    public long getStatusVersion() {
+        return statusVersion;
     }
 
     public BigDecimal getCommissionRate() {

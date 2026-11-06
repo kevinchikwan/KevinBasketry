@@ -96,10 +96,12 @@ public class MerchantOnboardingService {
     }
 
     private OnboardingResponse link(long merchantId, String email, String initialPassword) {
+        // The remote call runs outside any transaction, so the row lock below is only
+        // ever held for this short update, never while waiting for identity-service.
         LinkResult result = identity.link(email, merchantId, initialPassword);
         try {
             Merchant merchant = transaction.execute(status -> {
-                Merchant current = merchants.findById(merchantId).orElseThrow();
+                Merchant current = merchants.findByIdForUpdate(merchantId).orElseThrow();
                 if (result instanceof LinkResult.Linked) {
                     current.markLinked(email);
                     merchants.flush();

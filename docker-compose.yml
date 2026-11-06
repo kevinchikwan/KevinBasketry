@@ -1,0 +1,40 @@
+# Local development infrastructure (DESIGN.md Section 7).
+#
+#   Start: docker compose up -d --wait     (returns once the broker is healthy)
+#   Stop:  docker compose down             (also deletes the Kafka data)
+#
+# There is deliberately no volume: services still use in-memory H2, so Kafka's
+# data should not outlive theirs (services/README.md, "Restarting with H2").
+services:
+  kafka:
+    # Same 4.2 line as the client that Spring Boot 4.1 manages.
+    image: apache/kafka:4.2.2
+    ports:
+      # Services run from IntelliJ connect to localhost:9092. Local machine only.
+      - "127.0.0.1:9092:9092"
+    environment:
+      # One node in KRaft mode: broker and controller together, no Zookeeper.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # HOST is for the machine running Docker; INTERNAL is for other containers
+      # on this Compose network, which connect to kafka:29092.
+      KAFKA_LISTENERS: HOST://:9092,INTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: HOST://localhost:9092,INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: HOST:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      # One broker, so every internal topic has one replica.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Each service creates the topics it owns, with explicit partition counts.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
