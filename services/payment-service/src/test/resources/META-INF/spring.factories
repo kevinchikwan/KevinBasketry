@@ -1,0 +1,2 @@
+# Only active in the postgresTest Gradle task (see the class).
+org.springframework.test.context.ContextCustomizerFactory=com.basketry.payment.support.PostgresContextCustomizerFactory

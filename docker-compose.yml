@@ -68,6 +68,7 @@ services:
       POSTGRES_PASSWORD: ${BASKETRY_POSTGRES_ADMIN_PASSWORD:-local-dev-only-admin}
       BASKETRY_IDENTITY_DB_PASSWORD: ${BASKETRY_IDENTITY_DB_PASSWORD:-local-dev-only-identity}
       BASKETRY_MERCHANT_DB_PASSWORD: ${BASKETRY_MERCHANT_DB_PASSWORD:-local-dev-only-merchant}
+      BASKETRY_PAYMENT_DB_PASSWORD: ${BASKETRY_PAYMENT_DB_PASSWORD:-local-dev-only-payment}
     healthcheck:
       # Over TCP on purpose: while the init script runs, Postgres listens only on
       # its socket, so a socket check could pass before the databases exist.

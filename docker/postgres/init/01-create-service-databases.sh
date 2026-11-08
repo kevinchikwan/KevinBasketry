@@ -18,3 +18,4 @@ SQL
 
 create_service_database identity "$BASKETRY_IDENTITY_DB_PASSWORD"
 create_service_database merchant "$BASKETRY_MERCHANT_DB_PASSWORD"
+create_service_database payment "$BASKETRY_PAYMENT_DB_PASSWORD"

@@ -10,7 +10,7 @@ they talk to each other.
 | `catalog-service` | 8081 | Not started |
 | `merchant-service` | 8082 | In progress |
 | `inventory-service` | 8083 | Not started |
-| `payment-service` | 8084 | Not started |
+| `payment-service` | 8084 | In progress |
 | `order-service` | 8085 | Not started |
 | `promotion-service` | 8086 | Not started |
 | `conversation-service` | 8087 | Not started |
@@ -38,10 +38,11 @@ containers on the Compose network to `kafka:29092`) and to Postgres at
 `localhost:5432`. Both listen on 127.0.0.1 only. If port 5432 is taken, set
 `BASKETRY_POSTGRES_PORT` (for example to 5433) for Compose **and** the services.
 
-Both services also run without Kafka. merchant-service: `PATCH` still works and
-the events wait in its outbox until the broker is back. identity-service: login
-and every other request still work, and the status consumer catches up once the
-broker is back. Without their database they do not start.
+identity-service and merchant-service also run without Kafka. merchant-service:
+`PATCH` still works and the events wait in its outbox until the broker is back.
+identity-service: login and every other request still work, and the status
+consumer catches up once the broker is back. payment-service does not use Kafka
+yet. Without their database the services do not start.
 
 ## Running a service on Postgres
 
@@ -59,22 +60,28 @@ the first start.
   ```
 
   After stopping `bootRun`, check that no JVM is still holding the port
-  (8080 or 8082); stop it if there is.
+  (8080, 8082 or 8084); stop it if there is.
 
 | Variable | Default (local only) | Used by |
 |---|---|---|
-| `BASKETRY_POSTGRES_HOST` | `localhost` | both services |
-| `BASKETRY_POSTGRES_PORT` | `5432` | Compose and both services |
-| `BASKETRY_DB_USERNAME` | `identity` / `merchant` | each service |
-| `BASKETRY_DB_PASSWORD` | `local-dev-only-identity` / `local-dev-only-merchant` | each service |
-| `BASKETRY_IDENTITY_DB_PASSWORD`, `BASKETRY_MERCHANT_DB_PASSWORD` | the same two values | Compose's init script |
+| `BASKETRY_POSTGRES_HOST` | `localhost` | every service |
+| `BASKETRY_POSTGRES_PORT` | `5432` | Compose and every service |
+| `BASKETRY_DB_USERNAME` | `identity` / `merchant` / `payment` | each service |
+| `BASKETRY_DB_PASSWORD` | `local-dev-only-identity` / `local-dev-only-merchant` / `local-dev-only-payment` | each service |
+| `BASKETRY_IDENTITY_DB_PASSWORD`, `BASKETRY_MERCHANT_DB_PASSWORD`, `BASKETRY_PAYMENT_DB_PASSWORD` | the same three values | Compose's init script |
 | `BASKETRY_POSTGRES_ADMIN_PASSWORD` | `local-dev-only-admin` (user `postgres`) | Compose |
 
 The defaults are for local development only, and a service logs a WARN at
-startup when it uses one. Each service has its own database and user, and
-neither user can connect to the other's database. The init script
+startup when it uses one. Each service has its own database and user, and no
+user can connect to another service's database. The init script
 (`docker/postgres/init`) runs only when the Postgres volume is empty: after
 changing it or a Compose password, run `docker compose down -v`.
+
+**The `payment` database is new.** A Postgres volume created before it has no
+`payment` database or user, so payment-service cannot connect on Postgres. Run
+`docker compose down -v` once, then start Compose again. That **also wipes
+Kafka's data**, not only Postgres's (see Restarting): every service starts from
+empty, so restart the ones running on H2 too.
 
 ## Looking at the data
 
@@ -83,6 +90,7 @@ changing it or a Compose password, run `docker compose down -v`.
 ```
 docker compose exec postgres psql -U identity identity
 docker compose exec postgres psql -U merchant merchant
+docker compose exec postgres psql -U payment payment
 ```
 
 Then for example `\dt`, `select * from account;`, `\q` to quit.
@@ -90,21 +98,23 @@ Then for example `\dt`, `select * from account;`, `\q` to quit.
 **IntelliJ Database tool** (IntelliJ IDEA Ultimate): *Database* tool window →
 *+* → *Data Source* → *PostgreSQL*, then:
 
-| Field | identity-service | merchant-service |
-|---|---|---|
-| Host | `localhost` | `localhost` |
-| Port | `5432` | `5432` |
-| Authentication | User & Password | User & Password |
-| User | `identity` | `merchant` |
-| Password | `local-dev-only-identity` | `local-dev-only-merchant` |
-| Database | `identity` | `merchant` |
-| URL (filled in) | `jdbc:postgresql://localhost:5432/identity` | `jdbc:postgresql://localhost:5432/merchant` |
+| Field | identity-service | merchant-service | payment-service |
+|---|---|---|---|
+| Host | `localhost` | `localhost` | `localhost` |
+| Port | `5432` | `5432` | `5432` |
+| Authentication | User & Password | User & Password | User & Password |
+| User | `identity` | `merchant` | `payment` |
+| Password | `local-dev-only-identity` | `local-dev-only-merchant` | `local-dev-only-payment` |
+| Database | `identity` | `merchant` | `payment` |
+| URL (filled in) | `jdbc:postgresql://localhost:5432/identity` | `jdbc:postgresql://localhost:5432/merchant` | `jdbc:postgresql://localhost:5432/payment` |
 
 Download the driver files if asked, click *Test Connection*, and on the
 *Schemas* tab select only `public`. Tick *Read-only* on the *Options* tab, so
 browsing cannot change a row by accident. The tables: `account`,
-`admin_account` (identity), `merchant`, `outbox_event` (merchant), and
-`flyway_schema_history` in both.
+`admin_account` (identity), `merchant`, `outbox_event` (merchant),
+`payment_transaction`, `outbox_event` (payment), and `flyway_schema_history` in
+each. `payment_transaction` holds only the last 4 digits of a card number, never
+the full number.
 
 ## Restarting
 

@@ -17,6 +17,8 @@ unfinished work as done.
 
 Built so far: `identity-service` and `merchant-service`, including the
 `merchant.status.changed` event between them, from the outbox to the consumer.
+In progress: `payment-service`, whose charge and refund logic is done and whose
+Kafka side comes next.
 [`services/README.md`](services/README.md) has the status of every service and
 how to run the end-to-end check of that event.
 

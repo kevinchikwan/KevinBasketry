@@ -310,19 +310,76 @@ table:
 | *any other number* | Approved | `00` |
 
 ```
-Transaction
+PaymentTransaction              -- table payment_transaction (TRANSACTION is an SQL keyword)
   id (PK), transactionRef (unique)
-  orderId, merchantId           -- references only
-  amount: BigDecimal
+  orderId, merchantId           -- references only; unique together: the idempotency key
+  amount: BigDecimal            -- NUMERIC(12, 2); single currency, GBP, so no currency field
+  cardLast4                     -- the only part of the card number ever stored
   responseCode                  -- ISO 8583-style, from the table above
   status: APPROVED | DECLINED | REFUNDED
   createdAt
+  refundedAt                    -- set exactly when status is REFUNDED
+
+OutboxEvent                     -- one row per result to publish (Section 5)
+  id (PK), eventId (unique), topic
+  messageKey                    -- the orderId
+  payload                       -- the exact JSON to publish
+  status: PENDING | SENT, attempts, lastError, createdAt, sentAt
 ```
 An approved authorization is captured immediately (authorize + capture
 in one step). A refund of an `APPROVED` transaction always succeeds and
 moves it to `REFUNDED`. Because results are deterministic, every
 single-outcome saga path in Section 4 can be reproduced in demos just by
 choosing a card number.
+
+- **Idempotency: the row is the record**, with no separate dedupe table. Every
+  charge stores a row, `DECLINED` included. A repeated charge request finds it
+  by `(orderId, merchantId)`, and a refund finds it by `transactionRef`. Two
+  concurrent first requests cannot both insert: the loser's insert fails on the
+  unique constraint, its transaction is rolled back, and a **new** transaction
+  answers from the winner's row. It must be a new one, because on PostgreSQL a
+  failed statement aborts the whole transaction.
+- **A repeated request is never charged again**, and its stored result is
+  published again, as a new outbox row, because the first publish may have been
+  lost. It answers the question it asked:
+  - charge request, row `APPROVED` **or `REFUNDED`**: `charged`, with the same
+    `transactionRef`. A charge is still a charge after its refund.
+  - charge request, row `DECLINED`: `declined`, with the stored code.
+  - refund request, row `REFUNDED`: `refunded`.
+- **Same key, different payload** (same `orderId` and `merchantId`, different
+  amount or card): the first result stands and is published again, nothing is
+  authorized, and a WARN names both amounts and both last-4 digits.
+  **Known limitation:** only the last 4 digits are stored, so a different card
+  with the same last 4 digits cannot be detected.
+- **Refunds.** `APPROVED` becomes `REFUNDED` in one conditional update (only
+  from `APPROVED`), so two overlapping refunds move the row once and both
+  publish `refunded`. These are rejected, change nothing and publish nothing
+  (the dead-letter topic for them is planned for Day 9, Section 5):
+  - an unknown `transactionRef`;
+  - a `DECLINED` transaction;
+  - a `transactionRef` whose `orderId` or `merchantId` is not the request's.
+
+  A refund cannot overtake its charge. The reference is made in the charge's
+  transaction and leaves only through the outbox after the commit, and
+  `declined` carries no reference. So an unknown reference means data loss
+  (an H2 restart, a wiped database) or a bug.
+- **Validation** (a violation is rejected, as above):
+  - `orderId` and `merchantId` positive.
+  - `amount` > 0, at most 2 decimal places (more is refused, never rounded),
+    and at most 9,999,999,999.99, the column's maximum. A larger amount would
+    otherwise become a database error, which is retried forever.
+  - `cardNumber` 12 to 19 ASCII digits. No Luhn check: the mock approves any
+    number not in its table.
+  - `transactionRef` in the format below.
+- **`transactionRef`** is `TXN-` and 32 lowercase hex digits of a random UUID
+  (122 bits from `SecureRandom`), so it cannot be guessed from an order. It is
+  made once, when the row is inserted, for every row (a declined one too, for
+  tracing, though only `charged` carries it), and a repeat reads the stored one.
+- **The card number** in the contract is used only for the table lookup. It is
+  never stored (only the last 4 digits), never logged and never put in an
+  exception message, and the request object masks it in `toString`. A test runs
+  every path with Hibernate's SQL parameter logging on and checks that no log
+  line and no stored value contains it. Its copies in Kafka: Section 5.
 
 **Test strategy for mixed outcomes:** a buyer pays a whole order with
 one card, so with the live mock every merchant in an order gets the same
@@ -679,6 +736,9 @@ the JDK HttpClient.
   in Section 5 (`order.merchant-charge.requested`,
   `order.merchant-refund.requested` in; charged / declined / refunded
   out). Response codes follow the lookup table in Section 2.
+- The only HTTP endpoint is actuator's `GET /actuator/health`, for probes. It
+  shows the status and the probe groups, never details (database, disk), and no
+  other actuator endpoint is exposed.
 
 **promotion-service**
 - `POST /coupons` (Merchant — scope=MERCHANT, or Admin — scope=PLATFORM)
@@ -902,6 +962,64 @@ consumes it, see below; catalog-service comes later):
 - **Switch:** `basketry.merchant-status.consumer.enabled`, off in tests, which
   call the handler directly unless a test class turns the listener on.
 
+**payment-service results** (`order.merchant.charged`, `order.merchant.declined`,
+`order.merchant.refunded`; the rules for repeats are in Section 2,
+payment-service):
+What exists today is the outbox side; Kafka itself is planned for Day 9 (below).
+
+- **Transactional outbox**, the same pattern as merchant-service, in
+  payment-service's own `outbox_event` table: each result row is written in the
+  transaction that decided the result, so a result row exists if and only if the
+  result was stored. Each row holds its topic, its key and the exact payload.
+- **Key: `orderId`**, as a string, stored in the row's `messageKey`, so once
+  published, one order's results stay in order within each topic. **There is no
+  order across topics**: `charged` and `refunded` are different topics, so
+  order-service can see a re-published `charged` after the `refunded` of the same
+  charge.
+- **order-service must treat a `charged` or `refunded` result for an order
+  already in a final state (`SUCCEEDED` or `FAILED`) as a no-op.** That is safe:
+  order-service reaches a final state only once it has a result for every charge
+  (Section 4), so a later result is always a repeat. A repeated result for an
+  order still `PENDING` is dropped by `(orderId, merchantId)`, as for every
+  `order.*` event below.
+- **Value:** JSON, like `merchant.status.changed`, built once and stored in the
+  outbox row:
+  ```json
+  {"schemaVersion":1, "eventId":"<uuid>", "orderId":7, "merchantId":3,
+   "transactionRef":"TXN-<32 hex>", "occurredAt":"2026-11-08T10:00:00Z"}
+  ```
+  `declined` has `reasonCode` (the response code) instead of `transactionRef`, so
+  order-service never gets a reference it could refund. `refunded` has neither.
+  No result carries an amount or any part of the card number. A repeat is a new
+  event with a new `eventId`; `eventId` is for tracing only.
+- **A rejected request** (an invalid field, or a refund rejected in Section 2)
+  changes nothing and writes no outbox row, so nothing is published back.
+- The request topic carries the raw card number, because the contract does
+  (default retention). payment-service itself never stores or logs it
+  (Section 2).
+
+**Planned for Day 9** (not built yet):
+- **The relay**, as in merchant-service, publishing the outbox rows in `id`
+  order.
+- **Topics:** the three result topics, 3 partitions, replication factor 1,
+  created by payment-service on first publish, as merchant-service does. The two
+  request topics belong to order-service.
+- **The listeners** for the two request topics. They only turn a record into a
+  command and call `PaymentService`. A database error is retried with no limit,
+  as in identity-service.
+- **Dead-letter topics** for a request that can never succeed: a malformed
+  record, an invalid field or unknown `schemaVersion`, and the rejected refunds
+  of Section 2. The topics are `order.merchant-charge.requested.DLT` and
+  `order.merchant-refund.requested.DLT`, 3 partitions, owned by payment-service.
+  **A refund sent to the DLT has no reply topic**, so the order stays `PENDING`
+  (Section 6).
+- **The card number in the DLT.** The DLT keeps the original value: a masked
+  number would replay as "any other number" and be approved, so the DLT is
+  exposed exactly as much as the request topic. Its **exception headers** must
+  not quote the number (a Jackson parse error can quote the value), so they carry
+  the exception class and a message that never quotes a value. No retry topics,
+  which would copy the record again: retries seek, as in identity-service.
+
 The `order.*` events carry the `orderId` (and `merchantId`/`productId` where
 relevant) as a natural idempotency key — consumers must treat redelivery
 as a no-op if they've already processed that combination, since Kafka's
@@ -910,9 +1028,15 @@ at-least-once delivery means duplicates are expected, not exceptional.
 
 ## 6. Open questions for implementation
 
-- Exact idempotency-key strategy on `payment-service`'s consumer side
-  (dedupe table vs. relying on `PaymentService`'s existing reference
-  generation) — decide when we build `payment-service`'s Kafka listener.
+- **Decided** (was open): payment-service's idempotency key is a unique
+  `(orderId, merchantId)` on its transaction row, with no dedupe table; a refund
+  is keyed by `transactionRef` (Section 2, payment-service).
+- order-service has no stuck-saga handling yet: nothing happens when a charge,
+  reservation or refund result never arrives. In particular, **a refund that
+  payment-service sends to its dead-letter topic** (planned for Day 9; unknown reference, a
+  `DECLINED` transaction, another order's or merchant's reference) **gets no
+  reply, and the order stays `PENDING` until order-service has stuck-saga
+  handling**. Decide before writing order-service's saga coordinator.
 - Whether `order-service` needs its own outbox table to guarantee
   `MerchantChargeRequested` is published exactly once per DB commit
   (transactional outbox pattern) — worth doing properly rather than
@@ -1008,7 +1132,7 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
 - The root `docker-compose.yml` runs one Kafka broker in KRaft mode
   (`apache/kafka:4.2.2`, the same 4.2 line as the client), and, with the
   Compose profile `postgres`, one Postgres (`postgres:17.11-alpine`) holding a
-  database and a user per service (`identity`, `merchant`). `docker compose up
+  database and a user per service (`identity`, `merchant`, `payment`). `docker compose up
   -d --wait` starts Kafka only; `docker compose --profile postgres up -d --wait`
   starts both. Services run from IntelliJ reach Kafka at `localhost:9092`
   (other containers on the Compose network at `kafka:29092`) and Postgres at
