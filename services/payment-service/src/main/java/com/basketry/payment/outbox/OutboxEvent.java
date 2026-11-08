@@ -15,8 +15,7 @@ import java.util.UUID;
 /**
  * One result waiting to be published, or already published (DESIGN.md Section
  * 5, payment-service). Written only by {@link PaymentResultOutbox}, in the
- * transaction that decided the result. The relay that publishes the rows comes
- * with the Kafka side.
+ * transaction that decided the result, and published by {@link OutboxRelay}.
  */
 @Entity
 @Table(name = "outbox_event")

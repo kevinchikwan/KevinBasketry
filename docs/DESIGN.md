@@ -353,8 +353,8 @@ choosing a card number.
   with the same last 4 digits cannot be detected.
 - **Refunds.** `APPROVED` becomes `REFUNDED` in one conditional update (only
   from `APPROVED`), so two overlapping refunds move the row once and both
-  publish `refunded`. These are rejected, change nothing and publish nothing
-  (the dead-letter topic for them is planned for Day 9, Section 5):
+  publish `refunded`. These are rejected, change nothing and publish nothing;
+  the request goes to the refund dead-letter topic (Section 5):
   - an unknown `transactionRef`;
   - a `DECLINED` transaction;
   - a `transactionRef` whose `orderId` or `merchantId` is not the request's.
@@ -964,8 +964,7 @@ consumes it, see below; catalog-service comes later):
 
 **payment-service results** (`order.merchant.charged`, `order.merchant.declined`,
 `order.merchant.refunded`; the rules for repeats are in Section 2,
-payment-service):
-What exists today is the outbox side; Kafka itself is planned for Day 9 (below).
+payment-service; the requests that cause them are below):
 
 - **Transactional outbox**, the same pattern as merchant-service, in
   payment-service's own `outbox_event` table: each result row is written in the
@@ -997,28 +996,103 @@ What exists today is the outbox side; Kafka itself is planned for Day 9 (below).
 - The request topic carries the raw card number, because the contract does
   (default retention). payment-service itself never stores or logs it
   (Section 2).
+- **The relay** works as merchant-service's (every second, up to 100 `PENDING`
+  rows in `id` order, a failure stops the pass, waits of 1, 2, 4 … up to 60 s,
+  `SENT` rows kept, no transaction open during a send, same producer settings).
+  Differences: each row is sent to **the topic it names**, with its `messageKey`
+  as the key, and the publisher declares five topics, all created together on
+  its first publish and checked again after any failure: the three result topics
+  (3 partitions, replication factor 1) and, with the listeners on, the two
+  dead-letter topics below. payment-service never declares or creates the request
+  topics.
+- **Ids follow insert order, not commit order.** merchant-service gets its order
+  from the merchant row lock; payment-service has no such lock. A transaction that
+  took a lower id can commit after one with a higher id, and its row is then sent
+  in a later pass, after the higher one. Stopping on a failure only guarantees
+  that no row goes before a row that failed. **This is harmless here**, because
+  every result one topic carries for one `(orderId, merchantId)` has the same
+  outcome: a charge's stored row decides `charged` (with its one
+  `transactionRef`) or `declined` (with its one code) for good, and `refunded`
+  is always `refunded`. Order between two of them changes nothing for
+  order-service. **Revisit this if a result can ever change** for the same
+  `(orderId, merchantId)` on one topic, for example with partial refunds.
 
-**Planned for Day 9** (not built yet):
-- **The relay**, as in merchant-service, publishing the outbox rows in `id`
-  order.
-- **Topics:** the three result topics, 3 partitions, replication factor 1,
-  created by payment-service on first publish, as merchant-service does. The two
-  request topics belong to order-service.
-- **The listeners** for the two request topics. They only turn a record into a
-  command and call `PaymentService`. A database error is retried with no limit,
-  as in identity-service.
-- **Dead-letter topics** for a request that can never succeed: a malformed
-  record, an invalid field or unknown `schemaVersion`, and the rejected refunds
-  of Section 2. The topics are `order.merchant-charge.requested.DLT` and
-  `order.merchant-refund.requested.DLT`, 3 partitions, owned by payment-service.
-  **A refund sent to the DLT has no reply topic**, so the order stays `PENDING`
-  (Section 6).
-- **The card number in the DLT.** The DLT keeps the original value: a masked
-  number would replay as "any other number" and be approved, so the DLT is
-  exposed exactly as much as the request topic. Its **exception headers** must
-  not quote the number (a Jackson parse error can quote the value), so they carry
-  the exception class and a message that never quotes a value. No retry topics,
-  which would copy the record again: retries seek, as in identity-service.
+**payment-service requests** (`order.merchant-charge.requested`,
+`order.merchant-refund.requested`; order-service will produce them):
+- **Values.** Exactly these fields:
+  ```json
+  {"schemaVersion":1, "eventId":"<uuid>", "orderId":7, "merchantId":3,
+   "amount":25.50, "cardNumber":"4000000000000002", "occurredAt":"2026-11-08T10:00:00Z"}
+  {"schemaVersion":1, "eventId":"<uuid>", "orderId":7, "merchantId":3,
+   "transactionRef":"TXN-<32 hex>", "occurredAt":"2026-11-08T10:05:00Z"}
+  ```
+  Required: `schemaVersion` (checked first, only `1`), `orderId` and `merchantId`
+  (whole JSON numbers that fit 64 bits, so `7.0` and `"7"` are refused), `amount`
+  (a JSON number, read as a decimal and never as a double; `"25.50"` is refused),
+  `cardNumber` and `transactionRef` (JSON strings). `eventId` and `occurredAt`
+  are optional, strings when present, and not used. The values must then pass
+  Section 2's validation. The Kafka key should be the `orderId`; it is not
+  checked.
+- **Parsing is strict**, and every rule is checked by hand on the JSON tree, not
+  left to Jackson's binding (which would turn `"cardNumber":4000…` into a
+  string): no conversion between types, a repeated field is refused (otherwise
+  the last one would win), and so is anything after the object.
+- **Unknown fields are refused, a deliberate difference from identity-service's
+  consumer**, which ignores them: a payment must not silently ignore a field it
+  does not understand, such as a currency. **Any new field means a new
+  `schemaVersion`**, and payment-service must be deployed with it before
+  order-service sends the new version; until then every such request would go
+  to the dead-letter topic.
+- **Settings:** group id `payment-service` for both listeners, one thread each,
+  `auto.offset.reset=earliest`, auto-commit off with the container committing
+  after each record, `metadata.max.age.ms` 10 s, and the consumer never creates a
+  topic. **Kafka is not needed to start**, and the request topics may not exist
+  yet: the listeners find them when order-service creates them.
+- **The listeners only turn a record into a command and call `PaymentService`,
+  and never run inside a transaction**, nor does the relay. `PaymentService`
+  needs a new transaction after a lost race (Section 2), and would join an outer
+  one instead. A test checks that no transaction is open at either point, because
+  the race tests alone would not notice: the abort is a database error, which is
+  retried, and the retry succeeds.
+- **A request that cannot be handled:**
+
+  | Case | Action |
+  |---|---|
+  | Malformed JSON, no value, a missing, unknown, repeated or invalid field | Dead-letter topic, then the next record |
+  | Unknown `schemaVersion` | Dead-letter topic, then the next record |
+  | A refund rejected in Section 2 (unknown reference, `DECLINED`, another order's or merchant's) | Dead-letter topic, then the next record |
+  | Any unexpected exception | Dead-letter topic, then the next record |
+  | Database error (anywhere in the cause chain) | Retry with no limit, seeking back, waiting 1, 2, 4 … up to 60 s; the offset is not committed |
+
+  A database error says nothing about the request, so it is never dead-lettered.
+  Validation keeps a valid request from causing one: the largest valid ids and
+  amount fit every column (tested). If the dead-letter publish fails, the record
+  is tried again, not dropped.
+- **Dead-letter topics:** `order.merchant-charge.requested.DLT` and
+  `order.merchant-refund.requested.DLT`, 3 partitions, keyed like the original,
+  owned by payment-service and created on first use. No retry topics, which would
+  copy the record again. Nothing consumes them: replaying one by hand after a fix
+  is safe, because requests are idempotent (Section 2). **A refund sent to a
+  dead-letter topic gets no reply**, so the order stays `PENDING` (Section 6).
+- **The card number in the dead-letter topic.** The dead letter keeps the
+  original value byte for byte: a masked number would replay as "any other
+  number" and be approved, so the dead-letter topic is exposed exactly as much as
+  the request topic. Its exception headers are only two of ours: the exception
+  class, and a message that never quotes a value (for an unexpected exception, a
+  fixed text pointing to the log). Spring's message, cause and stack-trace headers
+  are not written, because a Jackson message in a cause can quote the number;
+  the parser's exceptions carry only a line and column, and no Jackson cause.
+  Spring Kafka logs records by their topic, partition and offset only, and the
+  error handler logs the same safe message. A test sends a sentinel number down
+  every listener path and checks every dead-letter header and key, every log line
+  and every stored value.
+- **Never run these loggers at TRACE**, here or in any service that handles the
+  request topics: `org.apache.kafka.clients` and
+  `org.springframework.kafka.core.DefaultKafkaProducerFactory`. Both print whole
+  records, card number included, and no setting of ours can stop them.
+- **Switches:** `basketry.payment-requests.consumer.enabled` and
+  `basketry.outbox.relay.enabled`, both off in tests, which call `PaymentService`
+  and the relay directly unless a test class turns them on.
 
 The `order.*` events carry the `orderId` (and `merchantId`/`productId` where
 relevant) as a natural idempotency key — consumers must treat redelivery
@@ -1033,7 +1107,7 @@ at-least-once delivery means duplicates are expected, not exceptional.
   is keyed by `transactionRef` (Section 2, payment-service).
 - order-service has no stuck-saga handling yet: nothing happens when a charge,
   reservation or refund result never arrives. In particular, **a refund that
-  payment-service sends to its dead-letter topic** (planned for Day 9; unknown reference, a
+  payment-service sends to its dead-letter topic** (unknown reference, a
   `DECLINED` transaction, another order's or merchant's reference) **gets no
   reply, and the order stays `PENDING` until order-service has stuck-saga
   handling**. Decide before writing order-service's saga coordinator.
@@ -1109,8 +1183,9 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   deployment. Without it, `identity-service` still starts but refuses
   every internal call, so merchant onboarding fails. `merchant-service`
   also needs `BASKETRY_IDENTITY_URL` (in a ConfigMap; not a secret) to reach
-  identity-service for the JWKS and for merchant-link. Both services need
-  `BASKETRY_KAFKA_BOOTSTRAP_SERVERS` (also a ConfigMap) to reach Kafka.
+  identity-service for the JWKS and for merchant-link. identity-service,
+  merchant-service and payment-service need `BASKETRY_KAFKA_BOOTSTRAP_SERVERS`
+  (also a ConfigMap) to reach Kafka.
 - The deployed profile has **no default database passwords**: each service
   gets `BASKETRY_DB_PASSWORD` from its own Secret. The `local-dev-only-…`
   defaults in `application-postgres.yml` are for local development only, and a
@@ -1143,8 +1218,8 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   migrations on both, and Hibernate only validates the schema.
 - **Kafka and Postgres keep their data in named volumes, and are kept or wiped
   together**, because each depends on the other: Postgres holds the merchant
-  versions and the outbox, Kafka the events already sent and the consumer's
-  position. Two rules:
+  versions, the payment transactions and both outboxes, Kafka the events already
+  sent and the consumers' positions. Two rules:
   - `docker compose down` stops everything and keeps all data.
   - `docker compose down -v` wipes all data, Kafka's and Postgres's, also when
     the `postgres` profile is not given.
@@ -1160,14 +1235,17 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   consumer keep the old ones: a new merchant 1 at version 1 would be ignored by a
   consumer that already applied version 5 of the old merchant 1. Restarting only
   identity-service loses every account, while merchant-service still shows its
-  merchants as `LINKED`, and there is no way to link them again. On Postgres
-  each service can be restarted on its own.
+  merchants as `LINKED`, and there is no way to link them again. Restarting only
+  payment-service loses every transaction and any `PENDING` result: a repeated
+  charge request is then charged again under a new `transactionRef`, and a refund
+  of an old reference goes to the dead-letter topic. On Postgres each service can
+  be restarted on its own.
 - **Interim:** REQUIREMENTS asks for the whole system to start with one
   documented command, and the stack table above puts Redis in Compose too.
   For now Compose holds Kafka and Postgres, and the services run from IntelliJ.
   The rest joins as each piece is built.
-- The default build (`./gradlew build`) needs no Docker: it runs on H2, and both
-  services' Kafka tests use an embedded KRaft broker. Two checks need Docker:
+- The default build (`./gradlew build`) needs no Docker: it runs on H2, and every
+  service's Kafka tests use an embedded KRaft broker. Two checks need Docker:
   `./gradlew postgresTest` runs every test again on a real Postgres in a
   Testcontainers container, and `scripts/e2e-merchant-status.ps1` runs the whole
   status chain on a real broker and real processes (`-Postgres` adds a restart

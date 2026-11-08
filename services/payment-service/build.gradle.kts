@@ -24,6 +24,8 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     implementation("org.springframework.boot:spring-boot-starter-flyway")
+    // The request listeners and the outbox relay (DESIGN.md Section 5).
+    implementation("org.springframework.boot:spring-boot-starter-kafka")
     // In-memory H2 by default; PostgreSQL with the "postgres" profile (DESIGN.md Section 7).
     runtimeOnly("com.h2database:h2")
     runtimeOnly("org.postgresql:postgresql")
@@ -32,6 +34,8 @@ dependencies {
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
+    // Embedded KRaft broker, so no test needs Docker.
+    testImplementation("org.springframework.boot:spring-boot-starter-kafka-test")
     // Only for postgresTest; the default test task never starts a container.
     testImplementation("org.testcontainers:testcontainers-postgresql")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

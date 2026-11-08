@@ -38,11 +38,49 @@ containers on the Compose network to `kafka:29092`) and to Postgres at
 `localhost:5432`. Both listen on 127.0.0.1 only. If port 5432 is taken, set
 `BASKETRY_POSTGRES_PORT` (for example to 5433) for Compose **and** the services.
 
-identity-service and merchant-service also run without Kafka. merchant-service:
+All three services also run without Kafka. merchant-service:
 `PATCH` still works and the events wait in its outbox until the broker is back.
 identity-service: login and every other request still work, and the status
-consumer catches up once the broker is back. payment-service does not use Kafka
-yet. Without their database the services do not start.
+consumer catches up once the broker is back. payment-service: the request
+listeners connect once the broker is back, and results wait in its outbox
+meanwhile. Without their database the services do not start.
+
+## Sending payment-service a request by hand
+
+order-service will own the two request topics and does not exist yet, and the
+broker does not create topics by itself, so create them once (they survive
+`docker compose down`, not `down -v`). payment-service creates its own result
+and dead-letter topics. From the repo root, with Compose and payment-service
+running:
+
+```
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 --create --if-not-exists --topic order.merchant-charge.requested --partitions 3 --replication-factor 1
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 --create --if-not-exists --topic order.merchant-refund.requested --partitions 3 --replication-factor 1
+```
+
+Produce a charge request, keyed by its orderId. Type the line after the
+producer starts, then Ctrl+C:
+
+```
+docker compose exec kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:29092 --topic order.merchant-charge.requested --property parse.key=true --property key.separator="|"
+7|{"schemaVersion":1,"orderId":7,"merchantId":3,"amount":25.50,"cardNumber":"4000000000000002"}
+```
+
+`4000000000000010` declines instead (DESIGN.md Section 2 has the table). A
+refund request goes to `order.merchant-refund.requested` the same way, with
+`"transactionRef"` (from the `charged` result) in place of `amount` and
+`cardNumber`. Read the results, and the dead-letter topic with its headers:
+
+```
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:29092 --topic order.merchant.charged --from-beginning --property print.key=true
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:29092 --topic order.merchant-charge.requested.DLT --from-beginning --property print.key=true --property print.headers=true
+```
+
+The other result topics are `order.merchant.declined` and
+`order.merchant.refunded`. A request with an unknown or wrongly typed field, or
+another `schemaVersion`, goes to the dead-letter topic (DESIGN.md Section 5).
+Request topics and dead-letter topics carry real card numbers in their values;
+only the test numbers belong there.
 
 ## Running a service on Postgres
 
@@ -132,13 +170,22 @@ back.
   versions, while Kafka and a running consumer keep the old ones, so the
   consumer would ignore new events because their versions look old. Restarting
   only identity-service loses every account, while merchant-service still shows
-  its merchants as `LINKED`, and they cannot be linked again.
+  its merchants as `LINKED`, and they cannot be linked again. Restarting only
+  payment-service loses every transaction: a repeated charge request is charged
+  again under a new reference, and refunds of old references go to the
+  dead-letter topic.
 
 ## Tests
 
 ```
 .\gradlew.bat build          # every test on H2; no Docker needed
 .\gradlew.bat postgresTest   # every test again on PostgreSQL 17.11; needs Docker
+```
+
+payment-service's card-number leak tests on their own (both are also part of
+the two runs above):
+
+```n.\gradlew.bat :payment-service:test --tests "*CardNumberLeakTests"
 ```
 
 `postgresTest` (also per service, e.g. `:merchant-service:postgresTest`) starts

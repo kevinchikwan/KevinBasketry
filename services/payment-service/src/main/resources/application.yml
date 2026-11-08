@@ -22,6 +22,45 @@ spring:
   flyway:
     locations: classpath:db/migration
 
+  # The two request topics in, the three result topics out (DESIGN.md Section 5).
+  # Startup never waits for Kafka: the listeners connect in the background and
+  # keep trying, and the relay creates the topics on its first publish.
+  kafka:
+    bootstrap-servers: ${BASKETRY_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: payment-service
+      # Requests published before this service first started are still read.
+      auto-offset-reset: earliest
+      # The container commits after each record is handled, never before.
+      enable-auto-commit: false
+      properties:
+        # order-service owns the request topics. Until it creates them they are
+        # missing, which is normal; this is how soon the consumer notices them
+        # (the client's default is 5 minutes).
+        allow.auto.create.topics: false
+        metadata.max.age.ms: 10000
+        # Keeps the log readable while the broker is down.
+        reconnect.backoff.max.ms: 10000
+    listener:
+      ack-mode: record
+      concurrency: 1
+      missing-topics-fatal: false
+    # The relay and the dead-letter topics. A send either finishes or fails within these limits.
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+    admin:
+      # Startup never touches Kafka: our topics are created on first use.
+      auto-create: false
+      operation-timeout: 3s
+      properties:
+        request.timeout.ms: 3000
+        default.api.timeout.ms: 3000
+
 # No REST API for anyone (DESIGN.md Section 3). The web server exists only for
 # the health endpoint, which shows no details (no database or disk information).
 management:
@@ -32,3 +71,32 @@ management:
   endpoint:
     health:
       show-details: never
+
+basketry:
+  # The result topics and the relay that publishes the outbox rows.
+  outbox:
+    # Fixed: changing the count later moves keys between partitions and breaks per-order order.
+    partitions: 3
+    replication-factor: 1
+    # Longer than max.block.ms plus delivery.timeout.ms, so the producer gives the answer first.
+    send-timeout: 16s
+    relay:
+      enabled: true
+      interval: 1s
+      batch-size: 100
+      # After a failed pass: wait 1s, 2s, 4s ... up to 60s. A success resets it.
+      backoff-initial: 1s
+      backoff-max: 60s
+  # The charge and refund request listeners.
+  payment-requests:
+    consumer:
+      enabled: true
+    # Owned and created by order-service, never here.
+    charge-topic: order.merchant-charge.requested
+    refund-topic: order.merchant-refund.requested
+    # Each request topic's dead-letter topic is its name plus ".DLT", created here on first use.
+    dead-letter-partitions: 3
+    replication-factor: 1
+    # After a database failure: wait 1s, 2s, 4s ... up to 60s, with no limit on attempts.
+    retry-initial: 1s
+    retry-max: 60s
