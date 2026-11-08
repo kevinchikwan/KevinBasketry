@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 import org.springframework.transaction.IllegalTransactionStateException;
@@ -246,6 +247,23 @@ class MerchantStatusTests extends MerchantServiceTestBase {
         assertThat(after.getStatusVersion()).isZero();
         assertThat(after.getCommissionRate()).isEqualByComparingTo("5.00");
         assertThat(events(merchant)).hasSize(1);
+    }
+
+    /** The backstop itself, straight on the table: one version per merchant, but any merchant may use it. */
+    @Test
+    void oneMerchantCannotHaveTwoEventsWithTheSameVersion() {
+        Merchant merchant = saveLinked("shop@example.com");
+        String insert = "INSERT INTO outbox_event (id, event_id, merchant_id, version, payload, status, created_at)"
+                + " VALUES (NEXTVAL('outbox_event_id_seq'), ?, ?, ?, '{}', 'SENT', CURRENT_TIMESTAMP)";
+        jdbc.update(insert, UUID.randomUUID(), merchant.getId(), 1);
+
+        assertThatThrownBy(() -> jdbc.update(insert, UUID.randomUUID(), merchant.getId(), 1))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("uq_outbox_event_merchant_version");
+
+        jdbc.update(insert, UUID.randomUUID(), merchant.getId(), 2);
+        jdbc.update(insert, UUID.randomUUID(), merchant.getId() + 1, 1);
+        assertThat(events(merchant)).extracting(OutboxEvent::getVersion).containsExactly(1L, 2L);
     }
 
     @Test

@@ -570,7 +570,11 @@ to tell apart carries a `code` property.
      identity-service's internal merchant-link is called, outside any
      database transaction.
   4. The answer is always **201** with a `Location` header once the
-     merchant is saved, whatever the link result. The body has the
+     merchant is saved, whatever the link result, with one exception: if the
+     merchant's row stays locked by another request for more than 5 s while
+     the link result is recorded, the answer is 503 `MERCHANT_BUSY` with the
+     `merchantCode`. The merchant stays `PENDING`, and a retry of the link
+     completes it (`ALREADY_LINKED` if identity-service had linked). The body has the
      merchant's fields plus exactly one of:
      - `accountOutcome` when the link succeeded (any 2xx) and the merchant
        is `LINKED`. `CREATED`: a new account was created with the initial
@@ -605,6 +609,8 @@ to tell apart carries a `code` property.
   - 409 `MERCHANT_ALREADY_LINKED` if the merchant is already `LINKED`.
   - 503 `INTERNAL_API_KEY_NOT_CONFIGURED`.
   - 409 `LOGIN_EMAIL_IN_USE` if another merchant has the email.
+  - 503 `MERCHANT_BUSY` (with the `merchantCode`) if the row stays locked for
+    more than 5 s while the result is recorded; the merchant stays `PENDING`.
   - Otherwise **200**, with the same body as `POST /merchants`.
 - `GET /merchants` (Admin — FR-A2). Same paging as `GET /accounts`: `page`
   from 0 (default 0), `size` 1..100 (default 20), anything out of range is
@@ -634,6 +640,9 @@ to tell apart carries a `code` property.
     merchant is `PENDING` (Section 2), even with an unchanged value. The 409
     applies nothing, not even the other fields. Without `active`, a `PENDING`
     merchant can still be changed.
+  - The `PATCH` reads the merchant with a row lock (Section 2) and waits at
+    most 5 s for another request's lock. Then it answers 503 `MERCHANT_BUSY`
+    and applies nothing; the client can retry.
 
 **Calling identity-service.** merchant-service uses Spring `RestClient` on
 the JDK HttpClient.
@@ -821,8 +830,9 @@ consumes it, see below; catalog-service comes later):
   - **Kafka down.** The row stays `PENDING`, with `attempts` and `lastError`
     updated, and the relay waits 1, 2, 4 … up to 60 s between attempts, resetting
     on success. There is no `FAILED` status, because giving up on a row would
-    lose the event. Nothing is lost while the database keeps the row (see the
-    H2 note in Section 7).
+    lose the event. Nothing is lost while the database keeps the row: on
+    Postgres it survives restarts, on H2 it does not (Section 7, Local
+    development).
   - **Crash after the send, before the mark.** The row is sent again, the same
     bytes, and consumers drop it by `version`.
   - **Two instances.** There is no leader lock. A rolling update can briefly
@@ -848,7 +858,8 @@ consumes it, see below; catalog-service comes later):
   event changes only those two columns, whatever `buyerActive` is.
 - **No linked account:** log a WARN and skip the event, committing its offset.
   merchant-service refuses to change `active` before the link, so this happens
-  only after data loss, such as an H2 restart. Retrying would block the
+  only after data loss, such as an H2 restart or wiping Postgres but not Kafka
+  (Section 7, Local development). Retrying would block the
   partition forever, and there is nothing to repair from a dead letter.
 - **Login** follows `merchantActive` from the next login on. Tokens already
   issued stay valid until they expire (Section 2, Tokens).
@@ -927,6 +938,10 @@ at-least-once delivery means duplicates are expected, not exceptional.
   `buyerActive = true` just before a deactivation commits, which leaves a
   deactivated buyer linked. Both changes survive and login is still refused
   (Section 2), so Admin can reactivate the buyer when wanted.
+- Postgres on the cluster: one Postgres pod holding one database per service
+  (as in local development), or one pod per service (as Section 7 says now).
+  Either way each service keeps its own database and user. Decide at
+  deployment, with the memory of the small AWS instance in mind.
 
 ## 7. Technology stack & deployment
 
@@ -941,7 +956,7 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
 | Framework | **Spring Boot 4.1** | Current stable line, built on Spring Framework 7; officially supports Java 25. Consistent across all 9 services |
 | Messaging | **Apache Kafka** | Event transport for the orchestrated checkout saga (Section 4/5) and read-model projections |
 | Caching / atomic ops | **Redis** | Two specific uses, not general-purpose caching everywhere: (1) atomic stock decrement in `inventory-service` to prevent overselling under concurrent checkouts, (2) read-through cache for `catalog-service`'s product listings, which are read far more often than written |
-| Containerization | **Docker** | Every service ships a Dockerfile; Kafka, Redis, and per-service Postgres run via Docker Compose for local dev |
+| Containerization | **Docker** | Every service ships a Dockerfile; Kafka, Redis, and Postgres (one database per service) run via Docker Compose for local dev |
 | Orchestration | **Kubernetes (k3s)** | Manifests for Deployments, Services, ConfigMaps, Secrets, and Ingress — real K8s objects, portable to a managed cluster (EKS) later without rewriting |
 | Cloud | **AWS** | Single free-tier-eligible EC2 instance running k3s; see below |
 | Frontend | **React + TypeScript** | Three separate apps — Buyer, Merchant, Admin (Section 1) |
@@ -972,8 +987,18 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   also needs `BASKETRY_IDENTITY_URL` (in a ConfigMap; not a secret) to reach
   identity-service for the JWKS and for merchant-link. Both services need
   `BASKETRY_KAFKA_BOOTSTRAP_SERVERS` (also a ConfigMap) to reach Kafka.
-- Each service's own datastore (H2 in early development, Postgres for
-  the deployed version) runs as its own pod with a persistent volume —
+- The deployed profile has **no default database passwords**: each service
+  gets `BASKETRY_DB_PASSWORD` from its own Secret. The `local-dev-only-…`
+  defaults in `application-postgres.yml` are for local development only, and a
+  service logs a WARN at startup when it uses one.
+- Replace the placeholder admin that `V2__seed_initial_admin.sql` seeds (its
+  email and password are public in this repository) before deploying anywhere
+  real (Section 2, Admin).
+- Each service owns its database and its own database user, and no service
+  reads another's. Locally, one Postgres container holds one database per
+  service, to save memory: the boundary is the database, not the server. The
+  deployed version runs each service's Postgres as its own pod with a
+  persistent volume (Section 6 keeps open whether one shared pod is enough) —
   acceptable for a single-node demo cluster; a real multi-node setup
   would use managed RDS instances instead, which is worth naming as the
   production-grade alternative even though it's not what's built here.
@@ -981,27 +1006,51 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
 ### Local development
 
 - The root `docker-compose.yml` runs one Kafka broker in KRaft mode
-  (`apache/kafka:4.2.2`, the same 4.2 line as the client). Start it with
-  `docker compose up -d --wait` and stop it with `docker compose down`. Services
-  run from IntelliJ reach it at `localhost:9092`; other containers on the
-  Compose network reach it at `kafka:29092`. It has no volume, so `down` deletes
-  its data.
+  (`apache/kafka:4.2.2`, the same 4.2 line as the client), and, with the
+  Compose profile `postgres`, one Postgres (`postgres:17.11-alpine`) holding a
+  database and a user per service (`identity`, `merchant`). `docker compose up
+  -d --wait` starts Kafka only; `docker compose --profile postgres up -d --wait`
+  starts both. Services run from IntelliJ reach Kafka at `localhost:9092`
+  (other containers on the Compose network at `kafka:29092`) and Postgres at
+  `localhost:5432` (`BASKETRY_POSTGRES_PORT` if that port is taken). Both bind
+  to 127.0.0.1 only.
+- Each service runs on in-memory H2 by default, and on Postgres with its Spring
+  profile `postgres` (`application-postgres.yml`). Flyway runs the same
+  migrations on both, and Hibernate only validates the schema.
+- **Kafka and Postgres keep their data in named volumes, and are kept or wiped
+  together**, because each depends on the other: Postgres holds the merchant
+  versions and the outbox, Kafka the events already sent and the consumer's
+  position. Two rules:
+  - `docker compose down` stops everything and keeps all data.
+  - `docker compose down -v` wipes all data, Kafka's and Postgres's, also when
+    the `postgres` profile is not given.
+
+  Wiping only Kafka would lose events that the relay already marked `SENT`
+  but identity-service had not read: its `merchantActive` stays wrong until that
+  merchant's next change. Wiping only Postgres would bring back the version
+  problem below.
+- **Restarting with H2.** H2 loses everything on every restart, so restart
+  **all** services and run `docker compose down -v` together, whichever one you
+  meant to restart. Restarting only merchant-service resets its merchant ids and
+  versions, and loses any `PENDING` outbox rows, while Kafka and a running
+  consumer keep the old ones: a new merchant 1 at version 1 would be ignored by a
+  consumer that already applied version 5 of the old merchant 1. Restarting only
+  identity-service loses every account, while merchant-service still shows its
+  merchants as `LINKED`, and there is no way to link them again. On Postgres
+  each service can be restarted on its own.
 - **Interim:** REQUIREMENTS asks for the whole system to start with one
-  documented command, and the stack table above puts Redis and Postgres in
-  Compose too.
-  For now Compose holds Kafka only, and the services run from IntelliJ on
-  in-memory H2. The rest joins as each piece is built.
-- No automated test needs Docker: both services' Kafka tests use an embedded
-  KRaft broker. `scripts/e2e-merchant-status.ps1` is the one check that does: it
-  runs the whole status chain on a real broker and real processes.
-- **Restarting with H2.** Restart **all** services and run `docker compose
-  down` together, whichever one you meant to restart. Restarting only
-  merchant-service resets its merchant ids and versions, and loses any `PENDING`
-  outbox rows, while Kafka and a running consumer keep the old ones: a new
-  merchant 1 at version 1 would be ignored by a consumer that already applied
-  version 5 of the old merchant 1. Restarting only identity-service loses every
-  account, while merchant-service still shows its merchants as `LINKED`, and
-  there is no way to link them again. This goes away with Postgres.
+  documented command, and the stack table above puts Redis in Compose too.
+  For now Compose holds Kafka and Postgres, and the services run from IntelliJ.
+  The rest joins as each piece is built.
+- The default build (`./gradlew build`) needs no Docker: it runs on H2, and both
+  services' Kafka tests use an embedded KRaft broker. Two checks need Docker:
+  `./gradlew postgresTest` runs every test again on a real Postgres in a
+  Testcontainers container, and `scripts/e2e-merchant-status.ps1` runs the whole
+  status chain on a real broker and real processes (`-Postgres` adds a restart
+  of both services on Postgres).
+- On Postgres, merchant-service's row-lock reads wait at most 5 s for another
+  transaction's lock, then answer 503 `MERCHANT_BUSY` (Postgres would otherwise
+  wait forever).
 
 ### What this deliberately does not include
 

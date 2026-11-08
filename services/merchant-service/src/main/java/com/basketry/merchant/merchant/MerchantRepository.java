@@ -1,13 +1,23 @@
 package com.basketry.merchant.merchant;
 
 import jakarta.persistence.LockModeType;
+import jakarta.persistence.QueryHint;
 import java.util.Optional;
+import org.hibernate.jpa.SpecHints;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.jpa.repository.QueryHints;
 import org.springframework.transaction.annotation.Transactional;
 
 public interface MerchantRepository extends JpaRepository<Merchant, Long> {
+
+    /**
+     * How long a row-lock read waits for another transaction's lock before it
+     * fails (Postgres waits forever by default). The caller turns that into a
+     * 503 {@link MerchantBusyException}.
+     */
+    String LOCK_TIMEOUT_MILLIS = "5000";
 
     Optional<Merchant> findByMerchantCode(String merchantCode);
 
@@ -21,11 +31,13 @@ public interface MerchantRepository extends JpaRepository<Merchant, Long> {
      * during a call to identity-service.
      */
     @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @QueryHints(@QueryHint(name = SpecHints.HINT_SPEC_LOCK_TIMEOUT, value = LOCK_TIMEOUT_MILLIS))
     @Query("select m from Merchant m where m.merchantCode = :merchantCode")
     Optional<Merchant> findByMerchantCodeForUpdate(String merchantCode);
 
     /** See {@link #findByMerchantCodeForUpdate}. */
     @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @QueryHints(@QueryHint(name = SpecHints.HINT_SPEC_LOCK_TIMEOUT, value = LOCK_TIMEOUT_MILLIS))
     @Query("select m from Merchant m where m.id = :id")
     Optional<Merchant> findByIdForUpdate(long id);
 

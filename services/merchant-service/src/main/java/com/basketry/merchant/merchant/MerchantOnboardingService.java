@@ -7,6 +7,7 @@ import com.basketry.merchant.identityclient.LinkResult;
 import java.time.Instant;
 import java.util.Optional;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -112,6 +113,10 @@ public class MerchantOnboardingService {
         } catch (DataIntegrityViolationException raceLost) {
             // A retry with a new email that another merchant took in the meantime.
             throw emailInUse(email, raceLost);
+        } catch (PessimisticLockingFailureException lockTimedOut) {
+            // The merchant stays as it was (PENDING). identity-service may have linked
+            // already; a retry of the link then gets ALREADY_LINKED and completes it.
+            throw new MerchantBusyException(Merchant.codeFor(merchantId), lockTimedOut);
         }
     }
 

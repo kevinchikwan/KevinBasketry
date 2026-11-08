@@ -1,6 +1,7 @@
 package com.basketry.merchant.merchant;
 
 import com.basketry.merchant.outbox.MerchantStatusOutbox;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -22,7 +23,12 @@ public class MerchantUpdateService {
 
     @Transactional
     public MerchantResponse update(String code, UpdateMerchantRequest request) {
-        Merchant merchant = merchants.findByMerchantCodeForUpdate(code).orElseThrow(MerchantNotFoundException::new);
+        Merchant merchant;
+        try {
+            merchant = merchants.findByMerchantCodeForUpdate(code).orElseThrow(MerchantNotFoundException::new);
+        } catch (PessimisticLockingFailureException lockTimedOut) {
+            throw new MerchantBusyException(lockTimedOut);
+        }
         if (request.hasActive() && merchant.getAccountLinkStatus() == AccountLinkStatus.PENDING) {
             throw new MerchantNotLinkedException();
         }

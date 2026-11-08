@@ -11,6 +11,7 @@ import jakarta.persistence.Table;
 import jakarta.persistence.Transient;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Locale;
 import org.springframework.data.domain.Persistable;
 
@@ -78,7 +79,9 @@ public class Merchant implements Persistable<Long> {
         this.commissionRate = commissionRate.setScale(2);
         this.loginEmail = loginEmail;
         this.accountLinkStatus = AccountLinkStatus.PENDING;
-        this.createdAt = createdAt;
+        // Truncated to what the database stores, so this object always matches what a
+        // later read of the row returns, wherever it is used (as in Account).
+        this.createdAt = createdAt.truncatedTo(ChronoUnit.MICROS);
         this.isNew = true;
     }
 

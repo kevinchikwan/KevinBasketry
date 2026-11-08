@@ -37,7 +37,10 @@ import org.springframework.transaction.support.TransactionTemplate;
 class AccountWriterOverlapTests {
 
     private static final int REPEATS = 20;
-    /** How long the first transaction stays open if the second does not finish. Below H2's lock timeout. */
+    /**
+     * How long the first transaction stays open if the second does not finish.
+     * Below H2's lock timeout; Postgres has none here, so the second simply waits.
+     */
     private static final long HOLD_MILLIS = 150;
     private static final String PASSWORD = "Corr3ct-Horse!";
     private static final String EMAIL = "shop@example.com";

@@ -1,0 +1,35 @@
+package com.basketry.merchant.config;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
+
+@ExtendWith(OutputCaptureExtension.class)
+class DevDatabasePasswordWarningTests {
+
+    private static final String WARNING = "The database password is a local development default";
+
+    @Test
+    void theDevDefaultFromThePostgresProfileIsWarnedAbout(CapturedOutput output) {
+        new DevDatabasePasswordWarning("local-dev-only-merchant").warnIfDevDefault();
+
+        assertThat(output).contains("WARN").contains(WARNING).doesNotContain("local-dev-only-merchant");
+    }
+
+    @Test
+    void aPasswordFromTheEnvironmentIsNotWarnedAbout(CapturedOutput output) {
+        new DevDatabasePasswordWarning("a-real-password-from-a-secret").warnIfDevDefault();
+
+        assertThat(output).doesNotContain(WARNING);
+    }
+
+    @Test
+    void theEmptyH2PasswordIsNotWarnedAbout(CapturedOutput output) {
+        new DevDatabasePasswordWarning("").warnIfDevDefault();
+
+        assertThat(output).doesNotContain(WARNING);
+    }
+}

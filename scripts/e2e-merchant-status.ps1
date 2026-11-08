@@ -12,13 +12,19 @@
 
         powershell -ExecutionPolicy Bypass -File scripts\e2e-merchant-status.ps1
 
-    It needs ports 8080, 8082 and 9092 free, and refuses to start otherwise, so
-    stop your own services first. It stops only what it started: it records the
-    PID of each service, and uses its own Compose project (basketry-e2e). The
-    services use in-memory H2, so every run starts from empty.
+    It needs ports 8080, 8082 and 9092 free (with -Postgres also the Postgres
+    port), and refuses to start otherwise, so stop your own services first. It
+    stops only what it started: it records the PID of each service, and uses its
+    own Compose project (basketry-e2e). It wipes only that project's data, before
+    and after the run, so every run starts from empty.
 
-    Service logs go to build\e2e. Secrets are never printed: the API key is
-    generated for this run and only passed through the environment.
+    With -Postgres the services run on the Compose Postgres instead of H2, and
+    the check also restarts both services halfway: the merchant, the link and
+    the status must survive, and the next status change must still arrive.
+
+    Service logs go to build\e2e. Secrets are never printed: the API key and the
+    database passwords are generated for this run and only passed through the
+    environment.
 
     Exit codes:
         0  every check passed
@@ -30,9 +36,14 @@
 
 .PARAMETER TimeoutSeconds
     How long to wait for a service to start, and for an event to arrive.
+
+.PARAMETER Postgres
+    Run the services on Postgres (Compose profile "postgres") and add the
+    restart step. The host port is BASKETRY_POSTGRES_PORT if set, else 5432.
 #>
 param(
-    [int]$TimeoutSeconds = 90
+    [int]$TimeoutSeconds = 90,
+    [switch]$Postgres
 )
 
 Set-StrictMode -Version 2.0
@@ -40,8 +51,20 @@ $ErrorActionPreference = 'Stop'
 
 $identityUrl = 'http://127.0.0.1:8080'
 $merchantUrl = 'http://127.0.0.1:8082'
-$ports = 8080, 8082, 9092
+$ports = @(8080, 8082, 9092)
+$postgresPort = 5432
+if ($env:BASKETRY_POSTGRES_PORT) {
+    $postgresPort = [int]$env:BASKETRY_POSTGRES_PORT
+}
+if ($Postgres) {
+    $ports += $postgresPort
+}
+# Only this project's containers and volumes are ever started or deleted.
 $composeProject = 'basketry-e2e'
+$compose = "docker compose -p $composeProject"
+if ($Postgres) {
+    $compose = "$compose --profile postgres"
+}
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $logDir = Join-Path $repoRoot 'build\e2e'
 
@@ -54,6 +77,8 @@ if ($env:BASKETRY_E2E_ADMIN_PASSWORD) {
 
 $script:startedProcesses = @()
 $script:composeStarted = $false
+# Per run, passed to the services through the environment only.
+$script:serviceEnvironment = @{}
 
 class E2eFailure : System.Exception {
     [int]$ExitCode
@@ -116,20 +141,52 @@ function New-Secret {
     return -join ($bytes | ForEach-Object { $_.ToString('x2') })
 }
 
-function Start-Service-Jar([string]$name) {
+# The variables in $script:serviceEnvironment[$name] are set only while the
+# process starts, so they reach that one service and stay out of this session.
+function Start-Service-Jar([string]$name, [string]$logName = $name) {
     $jar = Get-ChildItem (Join-Path $repoRoot "services\$name\build\libs") -Filter '*.jar' |
         Where-Object { $_.Name -notlike '*-plain.jar' } |
         Select-Object -First 1
     if ($null -eq $jar) {
         Stop-Check "No boot jar found for $name" 4
     }
-    $process = Start-Process -FilePath 'java' -ArgumentList '-jar', "`"$($jar.FullName)`"" `
-        -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput (Join-Path $logDir "$name.out.log") `
-        -RedirectStandardError (Join-Path $logDir "$name.err.log")
+    $environment = $script:serviceEnvironment[$name]
+    try {
+        foreach ($variable in $environment.Keys) {
+            Set-Item "Env:\$variable" $environment[$variable]
+        }
+        $process = Start-Process -FilePath 'java' -ArgumentList '-jar', "`"$($jar.FullName)`"" `
+            -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput (Join-Path $logDir "$logName.out.log") `
+            -RedirectStandardError (Join-Path $logDir "$logName.err.log")
+    } finally {
+        foreach ($variable in $environment.Keys) {
+            Remove-Item "Env:\$variable" -ErrorAction SilentlyContinue
+        }
+    }
     $script:startedProcesses += [pscustomobject]@{ Name = $name; Process = $process; Id = $process.Id }
     Write-Pass "$name started, PID $($process.Id)"
     return $process
+}
+
+# Stops one service this script started, and forgets it.
+function Stop-StartedService([string]$name) {
+    foreach ($started in @($script:startedProcesses | Where-Object { $_.Name -eq $name })) {
+        Stop-ProcessTree $started.Id
+        $started.Process.WaitForExit(15000) | Out-Null
+        Write-Pass "stopped $name (PID $($started.Id))"
+    }
+    $script:startedProcesses = @($script:startedProcesses | Where-Object { $_.Name -ne $name })
+}
+
+function Wait-ForPortFree([int]$port) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while (Test-PortBusy $port) {
+        if ((Get-Date) -gt $deadline) {
+            Stop-Check "Port $port is still busy after stopping the service" 5
+        }
+        Start-Sleep -Milliseconds 250
+    }
 }
 
 # Any HTTP answer counts, including 401: it means the service is listening.
@@ -219,9 +276,17 @@ function Stop-Everything {
         }
     }
     if ($script:composeStarted) {
-        Invoke-Quietly "docker compose -p $composeProject down" (Join-Path $logDir 'compose-down.log') | Out-Null
-        Write-Host "    stopped Compose project $composeProject"
+        # -v: Kafka and Postgres keep data in volumes, and the next run must start empty.
+        Invoke-Quietly "$compose down -v" (Join-Path $logDir 'compose-down.log') | Out-Null
+        Write-Host "    stopped Compose project $composeProject and deleted its data"
     }
+}
+
+function Start-BothServices([string]$logSuffix = '') {
+    $identity = Start-Service-Jar 'identity-service' "identity-service$logSuffix"
+    $merchant = Start-Service-Jar 'merchant-service' "merchant-service$logSuffix"
+    Wait-ForService 'identity-service' "$identityUrl/.well-known/jwks.json" $identity
+    Wait-ForService 'merchant-service' "$merchantUrl/merchants" $merchant
 }
 
 function Invoke-Check {
@@ -231,13 +296,16 @@ function Invoke-Check {
     }
     Write-Pass 'Docker is running'
 
+    # A run that was killed may have left its own project behind; nothing else is touched.
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    Invoke-Quietly "docker compose -p $composeProject --profile postgres down -v" (Join-Path $logDir 'compose-cleanup.log') | Out-Null
+
     $busy = @($ports | Where-Object { Test-PortBusy $_ })
     if ($busy.Count -gt 0) {
         Stop-Check "Port(s) $($busy -join ', ') are busy. Stop whatever uses them and run this again; nothing was started." 3
     }
     Write-Pass "ports $($ports -join ', ') are free"
 
-    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
     Invoke-Quietly 'java -version' (Join-Path $logDir 'java-version.log') | Out-Null
     if (-not (Select-String -Path (Join-Path $logDir 'java-version.log') -Pattern 'version "25' -Quiet)) {
         Stop-Check 'Java 25 must be the java on PATH.' 4
@@ -251,23 +319,49 @@ function Invoke-Check {
     }
     Write-Pass 'boot jars built'
 
-    Write-Step 'Starting Kafka'
-    $script:composeStarted = $true
-    if ((Invoke-Quietly "docker compose -p $composeProject up -d --wait" (Join-Path $logDir 'compose-up.log')) -ne 0) {
-        Stop-Check "Kafka did not start; see $logDir\compose-up.log" 5
+    $apiKey = New-Secret
+    $script:serviceEnvironment = @{
+        'identity-service' = @{ BASKETRY_INTERNAL_API_KEY = $apiKey }
+        'merchant-service' = @{ BASKETRY_INTERNAL_API_KEY = $apiKey }
     }
-    Write-Pass 'Kafka is healthy'
+    $composeEnvironment = @{}
+    $infrastructure = 'Kafka'
+    if ($Postgres) {
+        $infrastructure = 'Kafka and Postgres'
+        $identityDbPassword = New-Secret
+        $merchantDbPassword = New-Secret
+        $composeEnvironment = @{
+            BASKETRY_POSTGRES_ADMIN_PASSWORD = New-Secret
+            BASKETRY_IDENTITY_DB_PASSWORD = $identityDbPassword
+            BASKETRY_MERCHANT_DB_PASSWORD = $merchantDbPassword
+        }
+        foreach ($service in 'identity-service', 'merchant-service') {
+            $script:serviceEnvironment[$service].SPRING_PROFILES_ACTIVE = 'postgres'
+            $script:serviceEnvironment[$service].BASKETRY_POSTGRES_PORT = "$postgresPort"
+        }
+        $script:serviceEnvironment['identity-service'].BASKETRY_DB_PASSWORD = $identityDbPassword
+        $script:serviceEnvironment['merchant-service'].BASKETRY_DB_PASSWORD = $merchantDbPassword
+    }
+
+    Write-Step "Starting $infrastructure"
+    $script:composeStarted = $true
+    try {
+        foreach ($variable in $composeEnvironment.Keys) {
+            Set-Item "Env:\$variable" $composeEnvironment[$variable]
+        }
+        $up = Invoke-Quietly "$compose up -d --wait" (Join-Path $logDir 'compose-up.log')
+    } finally {
+        foreach ($variable in $composeEnvironment.Keys) {
+            Remove-Item "Env:\$variable" -ErrorAction SilentlyContinue
+        }
+    }
+    if ($up -ne 0) {
+        Stop-Check "$infrastructure did not start; see $logDir\compose-up.log" 5
+    }
+    Write-Pass "$infrastructure ready (healthchecks passed)"
 
     Write-Step 'Starting both services with one generated API key'
-    $env:BASKETRY_INTERNAL_API_KEY = New-Secret
-    try {
-        $identity = Start-Service-Jar 'identity-service'
-        $merchant = Start-Service-Jar 'merchant-service'
-    } finally {
-        Remove-Item Env:\BASKETRY_INTERNAL_API_KEY
-    }
-    Wait-ForService 'identity-service' "$identityUrl/.well-known/jwks.json" $identity
-    Wait-ForService 'merchant-service' "$merchantUrl/merchants" $merchant
+    Start-BothServices
 
     Write-Step 'Onboarding a merchant'
     $adminToken = Get-Token $adminEmail $adminPassword
@@ -303,6 +397,27 @@ function Invoke-Check {
     Assert-True ($null -eq $claims.PSObject.Properties['merchantId']) 'the next login has no merchantId'
     $stillValid = Invoke-Api 'GET' "$identityUrl/accounts/$accountId" $null $firstToken
     Assert-True ($stillValid.id -eq $accountId) 'the token issued earlier stays valid until it expires'
+
+    if ($Postgres) {
+        Write-Step 'Restarting both services: Postgres keeps their data'
+        Stop-StartedService 'merchant-service'
+        Stop-StartedService 'identity-service'
+        Wait-ForPortFree 8080
+        Wait-ForPortFree 8082
+        Start-BothServices '-restarted'
+        # identity-service's signing key lives in memory, so tokens from before do not survive.
+        $adminToken = Get-Token $adminEmail $adminPassword
+        $merchantAfter = Invoke-Api 'GET' "$merchantUrl/merchants/$($onboarded.merchantCode)" $null $adminToken
+        Assert-True ([long]$merchantAfter.id -eq [long]$onboarded.id) 'merchant-service still has the merchant'
+        Assert-True ($merchantAfter.accountLinkStatus -eq 'LINKED') 'it is still LINKED'
+        Assert-True ($merchantAfter.active -eq $false) 'it is still active=false'
+        Assert-True ($merchantAfter.createdAt -eq $onboarded.createdAt) 'its createdAt is unchanged'
+        $account = Invoke-Api 'GET' "$identityUrl/accounts/$accountId" $null $adminToken
+        Assert-True ($account.merchantActive -eq $false) 'identity-service still has merchantActive=false'
+        $claims = Get-Claims (Get-Token $email $password)
+        Assert-True ([long]$claims.sub -eq $accountId) 'the merchant logs in to the same account'
+        Assert-True (-not ($claims.capabilities -contains 'MERCHANT')) 'still without MERCHANT'
+    }
 
     Write-Step 'Reactivating the merchant'
     $patched = Invoke-Api 'PATCH' "$merchantUrl/merchants/$($onboarded.merchantCode)" @{ active = $true } $adminToken

@@ -44,7 +44,11 @@ import tools.jackson.databind.JsonNode;
 class MerchantRowLockTests extends MerchantServiceTestBase {
 
     private static final int REPEATS = 20;
-    /** How long the first transaction stays open if the second does not finish. Below H2's lock timeout. */
+    /**
+     * How long the first transaction stays open if the second does not finish.
+     * Below H2's lock timeout, and far below the 5 s row-lock timeout on Postgres
+     * (MerchantRepository.LOCK_TIMEOUT_MILLIS), so the second waits rather than fails.
+     */
     private static final long HOLD_MILLIS = 150;
 
     @Autowired

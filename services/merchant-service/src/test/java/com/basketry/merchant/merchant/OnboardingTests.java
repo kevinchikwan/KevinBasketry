@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withException;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withServerError;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -15,11 +16,13 @@ import com.basketry.merchant.support.TestTokens;
 import com.jayway.jsonpath.JsonPath;
 import java.math.BigDecimal;
 import java.net.SocketTimeoutException;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -63,6 +66,37 @@ class OnboardingTests extends MerchantServiceTestBase {
     }
 
     // --- success ----------------------------------------------------------
+
+    /**
+     * Guards against the object in memory ever reaching the response instead of the
+     * row: today the response comes from the row re-read under the lock, and this
+     * fails if the in-memory object is used without truncation (mutation M6b:
+     * open-in-view on and no truncation). The truncation itself is covered by
+     * {@link #createdAtIsKeptToTheMicrosecondTheDatabaseStores}. Repeated because a
+     * clock reading needs rounding to microseconds only most of the time.
+     */
+    @RepeatedTest(5)
+    void createdAtInTheResponseIsWhatAReadReturnsLater() throws Exception {
+        identityLinks(HttpStatus.CREATED, "CREATED");
+        String created = onboard(TestTokens.admin(), validBody()).andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        String code = JsonPath.read(created, "$.merchantCode");
+
+        String read = mockMvc.perform(bearer(get("/merchants/{code}", code), TestTokens.admin()))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        assertThat(Instant.parse(JsonPath.read(read, "$.createdAt")))
+                .isEqualTo(Instant.parse(JsonPath.read(created, "$.createdAt")));
+    }
+
+    @Test
+    void createdAtIsKeptToTheMicrosecondTheDatabaseStores() {
+        Merchant merchant = new Merchant(1, "Shop", "Food", true, new BigDecimal("5"), "shop@example.com",
+                Instant.parse("2026-11-07T10:15:30.123456789Z"));
+
+        assertThat(merchant.getCreatedAt()).isEqualTo(Instant.parse("2026-11-07T10:15:30.123456Z"));
+    }
 
     @Test
     void newAccountIsCreatedAndMerchantLinked() throws Exception {

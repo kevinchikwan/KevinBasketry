@@ -8,3 +8,10 @@ subprojects {
     group = "com.basketry"
     version = "0.1.0-SNAPSHOT"
 }
+
+// Both services' tests on PostgreSQL (needs Docker): .\gradlew.bat postgresTest
+tasks.register("postgresTest") {
+    description = "Runs every service's tests on PostgreSQL in a container. Needs Docker."
+    group = "verification"
+    dependsOn(subprojects.map { "${it.path}:postgresTest" })
+}

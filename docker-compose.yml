@@ -1,10 +1,14 @@
 # Local development infrastructure (DESIGN.md Section 7).
 #
-#   Start: docker compose up -d --wait     (returns once the broker is healthy)
-#   Stop:  docker compose down             (also deletes the Kafka data)
+#   Kafka only:      docker compose up -d --wait
+#   Kafka+Postgres:  docker compose --profile postgres up -d --wait
+#   Stop, keep data: docker compose down
+#   Wipe all data:   docker compose down -v
 #
-# There is deliberately no volume: services still use in-memory H2, so Kafka's
-# data should not outlive theirs (services/README.md, "Restarting with H2").
+# Kafka and Postgres both keep their data in named volumes, so they are kept or
+# wiped together: "down" keeps both, "down -v" deletes both (also the Postgres
+# volume when the profile is off). Services on in-memory H2 lose their data on
+# every restart, so with H2 use "down -v" (services/README.md, "Restarting").
 services:
   kafka:
     # Same 4.2 line as the client that Spring Boot 4.1 manages.
@@ -12,7 +16,12 @@ services:
     ports:
       # Services run from IntelliJ connect to localhost:9092. Local machine only.
       - "127.0.0.1:9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
     environment:
+      # Fixed, so the data in the volume stays valid across container restarts.
+      CLUSTER_ID: XPDM2DjHS9-m2krFO15jlQ
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
       # One node in KRaft mode: broker and controller together, no Zookeeper.
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -38,3 +47,36 @@ services:
       timeout: 10s
       retries: 20
       start_period: 10s
+
+  # Only with --profile postgres. One container, one database and one user per
+  # service (DESIGN.md Section 7); each service runs with its "postgres" profile.
+  postgres:
+    image: postgres:17.11-alpine
+    profiles: [postgres]
+    ports:
+      # Local machine only. Set BASKETRY_POSTGRES_PORT if 5432 is taken; the
+      # services read the same variable.
+      - "127.0.0.1:${BASKETRY_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Runs only when the volume is empty: a change here needs "down -v".
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    environment:
+      # Local development defaults, not secrets. Override them through these
+      # variables; a deployment never uses them (DESIGN.md Section 7).
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${BASKETRY_POSTGRES_ADMIN_PASSWORD:-local-dev-only-admin}
+      BASKETRY_IDENTITY_DB_PASSWORD: ${BASKETRY_IDENTITY_DB_PASSWORD:-local-dev-only-identity}
+      BASKETRY_MERCHANT_DB_PASSWORD: ${BASKETRY_MERCHANT_DB_PASSWORD:-local-dev-only-merchant}
+    healthcheck:
+      # Over TCP on purpose: while the init script runs, Postgres listens only on
+      # its socket, so a socket check could pass before the databases exist.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U identity -d identity"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+volumes:
+  kafka-data:
+  postgres-data:
