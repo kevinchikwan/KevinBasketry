@@ -1,0 +1,19 @@
+# PostgreSQL instead of the default in-memory H2 (DESIGN.md Section 7). Start
+# with the "postgres" profile, against Compose's Postgres:
+#   docker compose --profile postgres up -d --wait
+# Flyway runs the same migrations, and ddl-auto stays validate (application.yml).
+spring:
+  datasource:
+    url: jdbc:postgresql://${BASKETRY_POSTGRES_HOST:localhost}:${BASKETRY_POSTGRES_PORT:5432}/inventory
+    username: ${BASKETRY_DB_USERNAME:inventory}
+    # The default is for local development only, and the service logs a WARN at
+    # startup when it is used. A deployment sets BASKETRY_DB_PASSWORD from a
+    # Kubernetes Secret, and its profile has no defaults (DESIGN.md Section 7).
+    password: ${BASKETRY_DB_PASSWORD:local-dev-only-inventory}
+    hikari:
+      # Small on purpose: transactions are short, and locally one Postgres serves
+      # every service.
+      maximum-pool-size: 5
+      # Milliseconds (Hikari takes no "5s"). Fails soon instead of queueing
+      # while the database is gone.
+      connection-timeout: 5000

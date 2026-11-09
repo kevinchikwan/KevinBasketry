@@ -62,8 +62,11 @@ if ($Postgres) {
 # Only this project's containers and volumes are ever started or deleted.
 $composeProject = 'basketry-e2e'
 $compose = "docker compose -p $composeProject"
+# Only what this script needs: not Redis (inventory-service only), so port 6379 is never needed.
+$composeServices = 'kafka'
 if ($Postgres) {
     $compose = "$compose --profile postgres"
+    $composeServices = 'kafka postgres'
 }
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $logDir = Join-Path $repoRoot 'build\e2e'
@@ -349,7 +352,7 @@ function Invoke-Check {
         foreach ($variable in $composeEnvironment.Keys) {
             Set-Item "Env:\$variable" $composeEnvironment[$variable]
         }
-        $up = Invoke-Quietly "$compose up -d --wait" (Join-Path $logDir 'compose-up.log')
+        $up = Invoke-Quietly "$compose up -d --wait $composeServices" (Join-Path $logDir 'compose-up.log')
     } finally {
         foreach ($variable in $composeEnvironment.Keys) {
             Remove-Item "Env:\$variable" -ErrorAction SilentlyContinue

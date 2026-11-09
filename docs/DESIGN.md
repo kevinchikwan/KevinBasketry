@@ -242,18 +242,31 @@ accepting.
 
 ### inventory-service
 ```
-StockLevel
-  productId (PK, reference only)
-  quantity: int
+StockLevel                      -- table stock_level
+  productId (PK)                -- catalog-service's product; reference only
+  merchantId                    -- the owner; reference only; never changes
+  quantity: BIGINT              -- stock still available: reservations in progress are already taken off
+  createdAt, updatedAt
 
-StockReservation
-  orderId, productId            -- composite PK; doubles as the idempotency key
-  quantity: int
+StockReservation                -- table stock_reservation; one row per (order, product), kept for good
+  orderId, productId            -- composite PK; the idempotency key of reserve and release
+  quantity: int                 -- as requested; taken only while RESERVED
+  status: RESERVED | RELEASED | FAILED
+  reasonCode                    -- set exactly when FAILED: INSUFFICIENT_STOCK, UNKNOWN_PRODUCT,
+                                --   QUANTITY_OVER_LIMIT or RELEASED_BEFORE_RESERVE; the
+                                --   reasonCode of order.stock.reservation-failed
+  createdAt
+  releasedAt                    -- set exactly when RELEASED
+
+OutboxEvent                     -- one row per result to publish; the same table as payment-service's
+  id (PK), eventId (unique), topic
+  messageKey                    -- the orderId
+  payload, status: PENDING | SENT, attempts, lastError, createdAt, sentAt
 ```
-Postgres is the source of truth for `quantity` and the gate that decides
-whether a reservation succeeds. Redis holds a mirrored counter per product
-(`inventory:stock:{productId}`) used as a fast atomic pre-check, so
-checkouts that will obviously fail are rejected before touching Postgres.
+Postgres is the source of truth for `quantity` and **the only thing that
+decides a success**. Redis holds a mirrored counter per product
+(`inventory:stock:{productId}`), used as a fast atomic pre-check, so
+checkouts that will obviously fail are rejected before Postgres is written.
 
 **Concurrency design:** stock is **reserved at checkout initiation**, in
 parallel with the per-merchant payment authorizations (see Section 4) —
@@ -261,29 +274,137 @@ not deferred until `OrderSucceeded`. This closes the race where two
 buyers could both pass authorization against the same last unit before
 either order finishes. Each reservation runs these steps in order:
 
-1. **Redis pre-check** — a Lua script in one `EVAL` call reads the counter
-   (`tonumber(GET)`), and if `quantity >= requestedQty` decrements it with
-   `DECRBY`, otherwise returns "insufficient". Because the check and the
-   decrement happen in one script, there is no race window between them.
-   A missing key returns a distinct "not loaded" result (not zero stock),
-   so the service reloads that counter from Postgres and retries.
-2. **Postgres gate** — in one transaction:
-   `UPDATE stock_level SET quantity = quantity - :q WHERE product_id = :id AND quantity >= :q`
-   plus an insert into `StockReservation`. If a `StockReservation` row
-   already exists for this `(orderId, productId)`, the message is a
-   redelivery and is treated as a no-op.
-3. **Publish** — `StockReserved` only after step 2 commits. If step 2
-   updates zero rows or fails, Redis is incremented back and
-   `StockReservationFailed` is published.
+1. **Stored row.** In one transaction, look up `(orderId, productId)`. If a
+   row exists, the request is a repeat: answer from the row (below) and stop.
+   Redis is not touched, so a redelivery never takes from the counter again.
+2. **Limit.** More than 1,000 units in one line fails with
+   `QUANTITY_OVER_LIMIT`, before either store is touched.
+3. **Redis pre-check.** A Lua script in one call reads the counter and, if it
+   holds at least the quantity, decrements it with `DECRBY`; otherwise it
+   changes nothing and answers "insufficient". The check and the decrement are
+   one script, so there is no race window between them. A missing key answers
+   "not loaded" (not zero stock): the service reads the quantity from Postgres,
+   loads the counter with `SET NX` (so it never overwrites a counter another
+   request just loaded) and runs the script once more. A product with no stock
+   row gets no counter.
+   - **"Insufficient" is confirmed** with a plain read of Postgres (no lock).
+     Only if Postgres also has too little does the reservation fail
+     (`INSUFFICIENT_STOCK`) without a Postgres write. If Postgres has enough,
+     the counter has drifted and the gate decides.
+4. **Postgres gate.** In one transaction:
+   `UPDATE stock_level SET quantity = quantity - :q WHERE product_id = :id AND quantity >= :q`,
+   then the insert of the reservation row, then its outbox row. Zero rows
+   updated stores a `FAILED` row instead: `INSUFFICIENT_STOCK`, or
+   `UNKNOWN_PRODUCT` if there is no stock row. Two concurrent first requests
+   of the same pair cannot both insert: the loser's insert fails on the
+   primary key, which also rolls its decrement back, and a **new** transaction
+   answers from the winner's row (as in payment-service).
+5. **After the commit.** A failed gate (or an exception) gives the counter
+   back what this request took from it. A success that went past a counter
+   saying "insufficient" (step 3) subtracts its quantity from the counter now,
+   which may take the counter below zero. So every success is subtracted from
+   the counter exactly once. Without that last rule, ordinary concurrency would
+   leave the counter too high: a counter often says "insufficient" only
+   because another request took from it and has not committed yet, and if
+   that one then loses the gate, it gives its take back.
 
-Because a reservation is never confirmed before Postgres records it,
-Postgres is never behind Redis. If Redis restarts, a startup
-reconciliation reloads its counters from Postgres, and this cannot lead to
-overselling. The cost is one synchronous Postgres write per line item,
+**Failed outcomes are stored too.** Otherwise a reservation that failed for
+lack of stock, redelivered after a restock, would succeed for an order that
+order-service has already failed, and nobody would ever release it.
+
+**A repeat answers the question it asked**, from the stored row, and writes a
+new outbox row, because the first publish may have been lost:
+
+| Request | No row | `RESERVED` | `RELEASED` | `FAILED` |
+|---|---|---|---|---|
+| reserve | decide (steps 2–5) | `reserved` | `reserved` (it was reserved, as payment's `charged` after a refund) | `reservation-failed`, the stored code |
+| release | store a `FAILED` **tombstone** (`RELEASED_BEFORE_RESERVE`), WARN; `released` | `RESERVED` → `RELEASED` in one conditional update, give the **stored** quantity back; `released` | `released` | `released` (nothing was taken) |
+
+- The tombstone exists because a release can come before its reserve once
+  order-service gives up on a reservation that never answered (Section 6).
+  The late reserve then fails with `RELEASED_BEFORE_RESERVE` and takes
+  nothing; without the tombstone it would take stock nobody releases.
+- Two overlapping releases move the row once: the second update matches no
+  row, gives nothing back, and still publishes `released`.
+- A repeat with a different quantity keeps the first result and logs a WARN.
+  A release always gives back the stored quantity, never the request's.
+- A release adds to Postgres in the same transaction as the status change,
+  and adds to the counter after the commit.
+
+**Redis drift, and how it is repaired.** Redis and Postgres are two stores
+with no shared transaction, so the counter can drift either way:
+
+| Failure point | Counter ends up |
+|---|---|
+| Crash after the Redis decrement, before the gate commits (the redelivery then takes from the counter again before committing) | too low |
+| Gate committed a failure, crash before the counter got its take back | too low |
+| Release committed, crash before the counter was incremented (a redelivery sees `RELEASED` and does not add again) | too low |
+| A Redis reply lost after the command ran (the take is treated as unknown and never given back) | too low |
+| The commit succeeded but the client saw an error, so the take was given back | too high |
+| Redis was down or skipped while Postgres changed | too high or too low |
+| Reconciliation's overwrite racing a reservation or release in flight | too high or too low |
+
+Neither direction changes an answer: a counter too high only lets more
+requests reach the gate, and a counter too low is overruled by the confirming
+read. Repairs, with Postgres always winning:
+- **Startup reconciliation**, in the background so startup never waits for
+  Redis: every counter is overwritten from Postgres, in product order, 500 rows
+  per page. It repairs whatever a crash of this service left behind.
+- **Periodic reconciliation**, the same, every 5 minutes. Drift costs only
+  speed, so a slow interval is enough.
+- **Lazy loading** (`SET NX`) of a missing counter, for example after Redis
+  restarted while the service kept running.
+
+**Every Redis increment only applies if the key exists** (a second Lua
+script: `EXISTS`, then `INCRBY`). A plain `INCRBY` on a missing key would
+create a counter holding only the delta; a missing counter must stay missing
+until it is loaded from Postgres. Releases, the give-back after a failed gate,
+the subtraction in step 5 and adjustments all use it.
+
+**Redis unavailable.** Redis is never needed. Every Redis call goes through
+one guard: any error or timeout means "unavailable", the request goes on with
+the Postgres gate alone (still correct), and Redis is skipped for the next
+10 seconds instead of timing out on every request. A take that failed is
+treated as not taken, even if its reply was merely lost, so nothing is ever
+given back that may not have been taken. The client uses 500 ms timeouts and
+rejects commands at once while disconnected, so a queued command can never
+run after its caller has moved on. Redis is not part of the health endpoint,
+so an unreachable Redis never makes the pod unready. Releases and adjustments
+also go on without it. The counters it missed are repaired by reconciliation.
+
+**Stock rows and owners.** A product's row is created once, at zero (a new
+product shows as out of stock until its merchant adds some), for the merchant
+that owns it, and is never deleted. Creating it again for the same merchant
+changes nothing; another merchant is refused
+(`PRODUCT_OWNED_BY_OTHER_MERCHANT`). catalog-service will create the row
+when a product is created; until it exists, rows are created by hand or by
+tests.
+
+**Adjustments are deltas.** A merchant adds or removes units (up to 1,000,000
+either way, never 0) in one conditional statement, so an adjustment commutes
+with reservations in flight and needs no compare-and-set. A decrease below zero
+is refused (`STOCK_WOULD_GO_NEGATIVE`), and so is an increase that would take
+the stock above 1,000,000 (`STOCK_LIMIT_EXCEEDED`). A decrease is always
+allowed above that limit, because releases can lift stock above it. The
+counter gets the same delta, never a `SET`, which would give back what
+reservations in flight have taken from it.
+
+**Bounds** are enforced by the application only: ids positive (up to
+`Long.MAX_VALUE`), a reservation at most 1,000 units, an adjustment at most
+1,000,000 either way. The database checks only what the application always
+guarantees (stock never negative, status and reason code consistent). An upper
+CHECK on stock would make a release onto a product at the limit fail, and a
+database error caused by a valid request is retried forever. `quantity` is a
+BIGINT for the same reason: a release can lift stock above the adjustment
+limit, then a restock and another release can lift it further, with no bound an
+INTEGER would hold. The largest valid values are tested against every column.
+
+The cost of this design is one synchronous Postgres write per line item,
 which is acceptable at this scale. Rejected alternatives: Redis AOF
-persistence only shrinks the window in which a crash can lose a
-decrement (to about a second); using Postgres alone would be correct
-but would remove the atomic Redis step this design is meant to show.
+persistence only shrinks the window in which a crash can lose a decrement (to
+about a second), and Postgres rebuilds the counters anyway; using Postgres
+alone would be correct but would remove the atomic Redis step this design is
+meant to show.
 
 **Compensating release:** because stock is reserved eagerly, it becomes a
 third leg of the saga alongside the per-merchant charges (Section 4) — if
@@ -773,7 +894,7 @@ See `checkout-saga.mermaid` for the full diagram. Summary:
 5. `inventory-service` consumes each reservation request, pre-checks and
    decrements in Redis, then commits the conditional decrement in Postgres
    (Section 2), and only then publishes `StockReserved` (or
-   `StockReservationFailed` if insufficient quantity)
+   `StockReservationFailed` with a reason code, such as insufficient quantity)
 6. `order-service` waits for a result for **every** merchant charge it
    requested and **every** stock reservation in the order — not just one
    or the other.
@@ -795,9 +916,10 @@ See `checkout-saga.mermaid` for the full diagram. Summary:
    not sequentially, since they're independent of each other
 4. `payment-service` consumes refund requests and confirms
    `MerchantRefunded`; `inventory-service` consumes release requests,
-   deletes the `StockReservation` row and increments `stock_level` in one
-   Postgres transaction (a missing row means already released, so no-op),
-   then increments the Redis counter back and confirms `StockReleased`
+   marks the `StockReservation` row `RELEASED` and increments `stock_level`
+   in one Postgres transaction (the row is kept, so a repeated release, or a
+   reserve replayed after it, changes nothing; Section 2), then increments the
+   Redis counter back and confirms `StockReleased`
 5. Once **all** outstanding compensations (refunds and releases) are
    confirmed, `order-service` sets `Order.status = FAILED`, publishes
    `OrderFailed`
@@ -1136,6 +1258,23 @@ at-least-once delivery means duplicates are expected, not exceptional.
   `buyerActive = true` just before a deactivation commits, which leaves a
   deactivated buyer linked. Both changes survive and login is still refused
   (Section 2), so Admin can reactivate the buyer when wanted.
+- Known limitation, accepted for now: a stock adjustment is a delta, so a client
+  that retries one after a lost response applies it twice (Section 2,
+  inventory-service). The merchant sees the new quantity in the answer and can
+  correct it. The later fix is an `Idempotency-Key` header, stored with the
+  result of the first request.
+- When order-service gets stuck-saga handling and gives up on a reservation
+  that never answered, it must still send the release: inventory-service then
+  stores a tombstone, so the reservation, if it arrives late, takes nothing
+  (Section 2, inventory-service). Decide together with the stuck-saga handling.
+- catalog-service must create a product's stock row in inventory-service
+  when it creates the product, and retry until it succeeds. Until then the
+  product reads as out of stock, and reserving it fails with `UNKNOWN_PRODUCT`.
+  Decide the call (the internal endpoint comes with inventory-service's REST
+  API) when catalog-service is built.
+- Redis has no password locally (it listens on 127.0.0.1 only).
+  inventory-service reads `BASKETRY_REDIS_PASSWORD`; a deployment must set it
+  and configure Redis to require it. Decide at deployment, with the Redis pod.
 - Postgres on the cluster: one Postgres pod holding one database per service
   (as in local development), or one pod per service (as Section 7 says now).
   Either way each service keeps its own database and user. Decide at
@@ -1185,7 +1324,10 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   also needs `BASKETRY_IDENTITY_URL` (in a ConfigMap; not a secret) to reach
   identity-service for the JWKS and for merchant-link. identity-service,
   merchant-service and payment-service need `BASKETRY_KAFKA_BOOTSTRAP_SERVERS`
-  (also a ConfigMap) to reach Kafka.
+  (also a ConfigMap) to reach Kafka. inventory-service needs
+  `BASKETRY_REDIS_HOST` and `BASKETRY_REDIS_PORT` (ConfigMap) and
+  `BASKETRY_REDIS_PASSWORD` (Secret; Section 6) to reach Redis, which runs as
+  its own pod with no persistent volume.
 - The deployed profile has **no default database passwords**: each service
   gets `BASKETRY_DB_PASSWORD` from its own Secret. The `local-dev-only-…`
   defaults in `application-postgres.yml` are for local development only, and a
@@ -1205,14 +1347,23 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
 ### Local development
 
 - The root `docker-compose.yml` runs one Kafka broker in KRaft mode
-  (`apache/kafka:4.2.2`, the same 4.2 line as the client), and, with the
+  (`apache/kafka:4.2.2`, the same 4.2 line as the client), one Redis
+  (`redis:8.10.3-alpine`) for inventory-service's stock counters, and, with the
   Compose profile `postgres`, one Postgres (`postgres:17.11-alpine`) holding a
-  database and a user per service (`identity`, `merchant`, `payment`). `docker compose up
-  -d --wait` starts Kafka only; `docker compose --profile postgres up -d --wait`
-  starts both. Services run from IntelliJ reach Kafka at `localhost:9092`
-  (other containers on the Compose network at `kafka:29092`) and Postgres at
-  `localhost:5432` (`BASKETRY_POSTGRES_PORT` if that port is taken). Both bind
-  to 127.0.0.1 only.
+  database and a user per service (`identity`, `merchant`, `payment`,
+  `inventory`). `docker compose up -d --wait` starts Kafka and Redis;
+  `docker compose --profile postgres up -d --wait` starts all three. Services
+  run from IntelliJ reach Kafka at `localhost:9092` (other containers on the
+  Compose network at `kafka:29092`), Redis at `localhost:6379`
+  (`BASKETRY_REDIS_PORT` if that port is taken) and Postgres at
+  `localhost:5432` (`BASKETRY_POSTGRES_PORT`). All three bind to 127.0.0.1 only.
+- **Redis keeps nothing**: no RDB snapshots, no AOF, no volume, so every start
+  is empty and inventory-service reloads the counters from its database
+  (Section 2). It holds no data of record, so the volume rules below do not
+  concern it, and a stale counter can never outlive a wiped database. It has no
+  password locally; `maxmemory` is 64 MB with `noeviction`, so a full Redis
+  fails writes (inventory-service then uses Postgres alone) instead of silently
+  dropping counters.
 - Each service runs on in-memory H2 by default, and on Postgres with its Spring
   profile `postgres` (`application-postgres.yml`). Flyway runs the same
   migrations on both, and Hibernate only validates the schema.
@@ -1238,16 +1389,21 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   merchants as `LINKED`, and there is no way to link them again. Restarting only
   payment-service loses every transaction and any `PENDING` result: a repeated
   charge request is then charged again under a new `transactionRef`, and a refund
-  of an old reference goes to the dead-letter topic. On Postgres each service can
-  be restarted on its own.
+  of an old reference goes to the dead-letter topic. Restarting only
+  inventory-service loses every stock row and reservation: a repeated reserve
+  is then decided again, and a release of an old reservation stores a tombstone
+  and gives nothing back. On Postgres each service can be restarted on its own.
 - **Interim:** REQUIREMENTS asks for the whole system to start with one
-  documented command, and the stack table above puts Redis in Compose too.
-  For now Compose holds Kafka and Postgres, and the services run from IntelliJ.
-  The rest joins as each piece is built.
-- The default build (`./gradlew build`) needs no Docker: it runs on H2, and every
-  service's Kafka tests use an embedded KRaft broker. Two checks need Docker:
+  documented command. For now Compose holds Kafka, Redis and Postgres, and the
+  services run from IntelliJ. The rest joins as each piece is built.
+- The default build (`./gradlew build`) needs no Docker: it runs on H2, every
+  service's Kafka tests use an embedded KRaft broker, and inventory-service's
+  tests use an in-memory fake of the stock counter that passes the same contract
+  tests as the Redis one. Two checks need Docker:
   `./gradlew postgresTest` runs every test again on a real Postgres in a
-  Testcontainers container, and `scripts/e2e-merchant-status.ps1` runs the whole
+  Testcontainers container (for inventory-service also on a real Redis, the same
+  image as Compose, so the Lua scripts, their atomicity under 16 threads and the
+  oversell test run on the real stores), and `scripts/e2e-merchant-status.ps1` runs the whole
   status chain on a real broker and real processes (`-Postgres` adds a restart
   of both services on Postgres). `scripts/e2e-payment.ps1` does the same for
   payment-service's requests, results and dead-letter topics, using the Kafka

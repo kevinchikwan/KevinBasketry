@@ -9,7 +9,7 @@ they talk to each other.
 | `identity-service` | 8080 | In progress |
 | `catalog-service` | 8081 | Not started |
 | `merchant-service` | 8082 | In progress |
-| `inventory-service` | 8083 | Not started |
+| `inventory-service` | 8083 | In progress |
 | `payment-service` | 8084 | In progress |
 | `order-service` | 8085 | Not started |
 | `promotion-service` | 8086 | Not started |
@@ -21,29 +21,38 @@ exists so the repo's progress is visible at a glance without opening
 every folder. The ports are fixed so the services can run side by side
 locally; each service sets its own in `application.yml`.
 
-## Kafka and Postgres for local development
+## Kafka, Redis and Postgres for local development
 
-Both run from the `docker-compose.yml` at the repo root, with Docker Desktop
-running. Postgres starts only with the Compose profile `postgres`:
+All three run from the `docker-compose.yml` at the repo root, with Docker
+Desktop running. Postgres starts only with the Compose profile `postgres`:
 
 ```
-docker compose up -d --wait                     # Kafka only (services on H2)
-docker compose --profile postgres up -d --wait  # Kafka and Postgres
+docker compose up -d --wait                     # Kafka and Redis (services on H2)
+docker compose --profile postgres up -d --wait  # Kafka, Redis and Postgres
 docker compose down                             # stop everything, keep all data
 docker compose down -v                          # stop everything, wipe all data
 ```
 
 Services run from IntelliJ connect to Kafka at `localhost:9092` (other
-containers on the Compose network to `kafka:29092`) and to Postgres at
-`localhost:5432`. Both listen on 127.0.0.1 only. If port 5432 is taken, set
-`BASKETRY_POSTGRES_PORT` (for example to 5433) for Compose **and** the services.
+containers on the Compose network to `kafka:29092`), to Redis at
+`localhost:6379` and to Postgres at `localhost:5432`. All three listen on
+127.0.0.1 only. If port 5432 is taken, set `BASKETRY_POSTGRES_PORT` (for example
+to 5433) for Compose **and** the services; for 6379 the same with
+`BASKETRY_REDIS_PORT`.
+
+Redis holds only inventory-service's stock counters, which mirror its database.
+It keeps nothing: no snapshots, no append-only file, no volume. Every start is
+empty, and inventory-service reloads the counters from its database at startup,
+every 5 minutes, and whenever one is missing.
 
 All three services also run without Kafka. merchant-service:
 `PATCH` still works and the events wait in its outbox until the broker is back.
 identity-service: login and every other request still work, and the status
 consumer catches up once the broker is back. payment-service: the request
 listeners connect once the broker is back, and results wait in its outbox
-meanwhile. Without their database the services do not start.
+meanwhile. inventory-service also runs without Redis: reservations are then
+decided by its database alone, still correctly, and it logs one WARN per outage.
+Without their database the services do not start.
 
 ## Sending payment-service a request by hand
 
@@ -99,16 +108,19 @@ the first start.
   ```
 
   After stopping `bootRun`, check that no JVM is still holding the port
-  (8080, 8082 or 8084); stop it if there is.
+  (8080, 8082, 8083 or 8084); stop it if there is.
 
 | Variable | Default (local only) | Used by |
 |---|---|---|
 | `BASKETRY_POSTGRES_HOST` | `localhost` | every service |
 | `BASKETRY_POSTGRES_PORT` | `5432` | Compose and every service |
-| `BASKETRY_DB_USERNAME` | `identity` / `merchant` / `payment` | each service |
-| `BASKETRY_DB_PASSWORD` | `local-dev-only-identity` / `local-dev-only-merchant` / `local-dev-only-payment` | each service |
-| `BASKETRY_IDENTITY_DB_PASSWORD`, `BASKETRY_MERCHANT_DB_PASSWORD`, `BASKETRY_PAYMENT_DB_PASSWORD` | the same three values | Compose's init script |
+| `BASKETRY_DB_USERNAME` | `identity` / `merchant` / `payment` / `inventory` | each service |
+| `BASKETRY_DB_PASSWORD` | `local-dev-only-identity` / `local-dev-only-merchant` / `local-dev-only-payment` / `local-dev-only-inventory` | each service |
+| `BASKETRY_IDENTITY_DB_PASSWORD`, `BASKETRY_MERCHANT_DB_PASSWORD`, `BASKETRY_PAYMENT_DB_PASSWORD`, `BASKETRY_INVENTORY_DB_PASSWORD` | the same four values | Compose's init script |
 | `BASKETRY_POSTGRES_ADMIN_PASSWORD` | `local-dev-only-admin` (user `postgres`) | Compose |
+| `BASKETRY_REDIS_HOST` | `localhost` | inventory-service |
+| `BASKETRY_REDIS_PORT` | `6379` | Compose and inventory-service |
+| `BASKETRY_REDIS_PASSWORD` | empty (no password locally) | inventory-service |
 
 The defaults are for local development only, and a service logs a WARN at
 startup when it uses one. Each service has its own database and user, and no
@@ -116,11 +128,20 @@ user can connect to another service's database. The init script
 (`docker/postgres/init`) runs only when the Postgres volume is empty: after
 changing it or a Compose password, run `docker compose down -v`.
 
-**The `payment` database is new.** A Postgres volume created before it has no
-`payment` database or user, so payment-service cannot connect on Postgres. Run
-`docker compose down -v` once, then start Compose again. That **also wipes
-Kafka's data**, not only Postgres's (see Restarting): every service starts from
-empty, so restart the ones running on H2 too.
+**The `inventory` database is new** (as `payment` was before it). A Postgres
+volume created before it has no `inventory` database or user, so
+inventory-service cannot connect on Postgres. Either run `docker compose down -v`
+once and start Compose again, which **also wipes Kafka's data** and every other
+service's (see Restarting), so restart the ones running on H2 too; or, keeping
+all data, create just the new database and user in the running container
+(change the password if you overrode `BASKETRY_INVENTORY_DB_PASSWORD`):
+
+```
+docker compose exec postgres psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE inventory LOGIN PASSWORD 'local-dev-only-inventory';" -c "CREATE DATABASE inventory OWNER inventory;" -c "REVOKE CONNECT, TEMPORARY ON DATABASE inventory FROM PUBLIC;"
+```
+
+This does what the init script would have done for `inventory`. A volume that
+also predates `payment` needs the same three statements for `payment`.
 
 ## Looking at the data
 
@@ -130,6 +151,7 @@ empty, so restart the ones running on H2 too.
 docker compose exec postgres psql -U identity identity
 docker compose exec postgres psql -U merchant merchant
 docker compose exec postgres psql -U payment payment
+docker compose exec postgres psql -U inventory inventory
 ```
 
 Then for example `\dt`, `select * from account;`, `\q` to quit.
@@ -151,9 +173,25 @@ Download the driver files if asked, click *Test Connection*, and on the
 *Schemas* tab select only `public`. Tick *Read-only* on the *Options* tab, so
 browsing cannot change a row by accident. The tables: `account`,
 `admin_account` (identity), `merchant`, `outbox_event` (merchant),
-`payment_transaction`, `outbox_event` (payment), and `flyway_schema_history` in
-each. `payment_transaction` holds only the last 4 digits of a card number, never
-the full number.
+`payment_transaction`, `outbox_event` (payment), `stock_level`,
+`stock_reservation`, `outbox_event` (inventory), and `flyway_schema_history` in
+each. For inventory-service, use `inventory` as user and database and
+`local-dev-only-inventory` as password. `payment_transaction` holds only the
+last 4 digits of a card number, never the full number.
+
+**The stock counters in Redis**, while Compose runs (one key per product,
+`inventory:stock:<productId>`; a missing key means "not loaded", not zero):
+
+```
+docker compose exec redis redis-cli --scan --pattern "inventory:stock:*"
+docker compose exec redis redis-cli GET inventory:stock:42
+```
+
+A counter may differ from `stock_level.quantity` for a while (DESIGN.md
+Section 2 lists why); only the database decides a reservation, and the next
+reconciliation (at most 5 minutes) sets the counter back to the database's
+value. Never change a counter by hand to fix stock: change the database (or,
+from the next stage, use the adjustment endpoint), and the counter follows.
 
 ## Restarting
 
@@ -165,6 +203,8 @@ identity-service are lost; without Postgres's, the version problem below comes
 back.
 
 - **On Postgres**, each service can be restarted on its own.
+- **Redis** can be restarted or wiped at any time: it holds nothing that
+  inventory-service cannot reload from its database.
 - **On H2**, every restart empties that service's database. Restart **all**
   services and run `docker compose down -v` together, whichever one you meant
   to restart. Restarting only merchant-service resets its merchant ids and
@@ -174,13 +214,14 @@ back.
   its merchants as `LINKED`, and they cannot be linked again. Restarting only
   payment-service loses every transaction: a repeated charge request is charged
   again under a new reference, and refunds of old references go to the
-  dead-letter topic.
+  dead-letter topic. Restarting only inventory-service loses every stock row and
+  reservation.
 
 ## Tests
 
 ```
 .\gradlew.bat build          # every test on H2; no Docker needed
-.\gradlew.bat postgresTest   # every test again on PostgreSQL 17.11; needs Docker
+.\gradlew.bat postgresTest   # every test again on PostgreSQL 17.11 (and Redis 8.10.3); needs Docker
 ```
 
 payment-service's card-number leak tests on their own (both are also part of
@@ -194,6 +235,13 @@ one Testcontainers Postgres for the run and points every test at it (the tests
 do not use the `postgres` profile, only its database). Tests tagged `postgres`
 run only there: they check that the run really is on Postgres, that each
 service starts with its real `postgres` profile, and the 5 s row-lock timeout.
+
+inventory-service's `postgresTest` also starts one Testcontainers Redis (the
+Compose image, with the same no-persistence flags) and runs every test against
+it with the real Lua scripts. Its default `test` uses an in-memory fake counter
+instead, which passes the same contract tests. Tests tagged `redis` run only in
+`postgresTest`: the contract against Redis, 16 threads taking the last unit 100
+times over, and a check that the run really is on Redis 8.10.3.
 
 ## End-to-end check
 

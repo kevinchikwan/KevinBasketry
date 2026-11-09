@@ -1,0 +1,4 @@
+# Only active in the postgresTest Gradle task (see the classes).
+org.springframework.test.context.ContextCustomizerFactory=\
+  com.basketry.inventory.support.PostgresContextCustomizerFactory,\
+  com.basketry.inventory.support.RedisContextCustomizerFactory

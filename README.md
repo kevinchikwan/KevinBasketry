@@ -16,11 +16,13 @@ as each piece lands — it's describing where the project is, not presenting
 unfinished work as done.
 
 Built so far: `identity-service` and `merchant-service`, including the
-`merchant.status.changed` event between them, from the outbox to the consumer.
-In progress: `payment-service`, whose charge and refund logic is done and whose
-Kafka side comes next.
+`merchant.status.changed` event between them, from the outbox to the consumer,
+and `payment-service`, with its Kafka requests, results and dead-letter topics.
+In progress: `inventory-service`, whose reservations, releases and adjustments
+(PostgreSQL as the gate, Redis as the atomic pre-check) are done; its REST API
+and Kafka side come next.
 [`services/README.md`](services/README.md) has the status of every service and
-how to run the end-to-end check of that event.
+how to run the end-to-end checks.
 
 ## Start here
 

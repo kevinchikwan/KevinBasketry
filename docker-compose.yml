@@ -1,14 +1,16 @@
 # Local development infrastructure (DESIGN.md Section 7).
 #
-#   Kafka only:      docker compose up -d --wait
-#   Kafka+Postgres:  docker compose --profile postgres up -d --wait
-#   Stop, keep data: docker compose down
-#   Wipe all data:   docker compose down -v
+#   Kafka and Redis:  docker compose up -d --wait
+#   ... and Postgres: docker compose --profile postgres up -d --wait
+#   Stop, keep data:  docker compose down
+#   Wipe all data:    docker compose down -v
 #
 # Kafka and Postgres both keep their data in named volumes, so they are kept or
 # wiped together: "down" keeps both, "down -v" deletes both (also the Postgres
-# volume when the profile is off). Services on in-memory H2 lose their data on
-# every restart, so with H2 use "down -v" (services/README.md, "Restarting").
+# volume when the profile is off). Redis keeps nothing: it only mirrors stock
+# counts that inventory-service reloads from its database. Services on in-memory
+# H2 lose their data on every restart, so with H2 use "down -v"
+# (services/README.md, "Restarting").
 services:
   kafka:
     # Same 4.2 line as the client that Spring Boot 4.1 manages.
@@ -48,6 +50,26 @@ services:
       retries: 20
       start_period: 10s
 
+  # inventory-service's stock counters (DESIGN.md Section 2). Never the source of
+  # truth: no persistence and no volume, so every start is empty and
+  # inventory-service reloads the counters from its database. A stale counter
+  # can therefore never outlive a wiped database.
+  redis:
+    image: redis:8.10.3-alpine
+    ports:
+      # Services run from IntelliJ connect to localhost:6379. Local machine only.
+      # Set BASKETRY_REDIS_PORT if 6379 is taken; inventory-service reads the same variable.
+      - "127.0.0.1:${BASKETRY_REDIS_PORT:-6379}:6379"
+    # No RDB snapshots, no AOF. The counters are tiny; noeviction, so a full
+    # memory limit fails writes (inventory-service then uses PostgreSQL alone)
+    # instead of silently dropping counters.
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "64mb", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
   # Only with --profile postgres. One container, one database and one user per
   # service (DESIGN.md Section 7); each service runs with its "postgres" profile.
   postgres:
@@ -69,6 +91,7 @@ services:
       BASKETRY_IDENTITY_DB_PASSWORD: ${BASKETRY_IDENTITY_DB_PASSWORD:-local-dev-only-identity}
       BASKETRY_MERCHANT_DB_PASSWORD: ${BASKETRY_MERCHANT_DB_PASSWORD:-local-dev-only-merchant}
       BASKETRY_PAYMENT_DB_PASSWORD: ${BASKETRY_PAYMENT_DB_PASSWORD:-local-dev-only-payment}
+      BASKETRY_INVENTORY_DB_PASSWORD: ${BASKETRY_INVENTORY_DB_PASSWORD:-local-dev-only-inventory}
     healthcheck:
       # Over TCP on purpose: while the init script runs, Postgres listens only on
       # its socket, so a socket check could pass before the databases exist.
