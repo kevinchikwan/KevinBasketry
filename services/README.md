@@ -92,6 +92,50 @@ another `schemaVersion`, goes to the dead-letter topic (DESIGN.md Section 5).
 Request topics and dead-letter topics carry real card numbers in their values;
 only the test numbers belong there.
 
+## Trying inventory-service's REST API by hand
+
+catalog-service does not exist yet, so stock rows are created through the
+internal endpoint it will use. Start identity-service, merchant-service and
+inventory-service (H2 is fine; Redis optional, Kafka not needed), each from a
+PowerShell window in which the same internal key is set first (any value of at
+least 32 characters):
+
+```
+$env:BASKETRY_INTERNAL_API_KEY = 'local-dev-only-internal-key-00000000'
+.\gradlew.bat :inventory-service:bootRun    # and :identity-service:bootRun, :merchant-service:bootRun
+```
+
+Then, from another PowerShell window with the same variable set (the admin is
+the placeholder that identity-service seeds; DESIGN.md Section 7):
+
+```
+$admin = (Invoke-RestMethod -Method Post http://localhost:8080/auth/login -ContentType 'application/json' -Body '{"email":"admin-placeholder@basketry.example","password":"ChangeMe-Before-Deploy!"}').accessToken
+$merchantId = (Invoke-RestMethod -Method Post http://localhost:8082/merchants -Headers @{ Authorization = "Bearer $admin" } -ContentType 'application/json' -Body '{"name":"Corner Shop","category":"Groceries","kycVerified":true,"commissionRate":5.00,"loginEmail":"shop@example.com","initialPassword":"Shop-Pass1"}').id
+$merchant = (Invoke-RestMethod -Method Post http://localhost:8080/auth/login -ContentType 'application/json' -Body '{"email":"shop@example.com","password":"Shop-Pass1"}').accessToken
+$key = @{ 'X-Internal-Api-Key' = $env:BASKETRY_INTERNAL_API_KEY }
+Invoke-RestMethod -Method Post http://localhost:8083/internal/stock -Headers $key -ContentType 'application/json' -Body "{`"productId`":42,`"merchantId`":$merchantId}"
+Invoke-RestMethod -Method Post http://localhost:8083/stock/42/adjustments -Headers @{ Authorization = "Bearer $merchant" } -ContentType 'application/json' -Body '{"delta":10}'
+Invoke-RestMethod http://localhost:8083/stock -Headers @{ Authorization = "Bearer $merchant" }
+Invoke-RestMethod "http://localhost:8083/internal/stock?productIds=42,43" -Headers $key
+```
+
+The create answers `outcome: CREATED` at quantity 0 (`ALREADY_EXISTS` when
+repeated), the adjustment answers the new quantity, and the last call leaves
+out product 43, which has no stock row. A refusal makes `Invoke-RestMethod`
+throw. Windows PowerShell 5.1 does not show the problem detail (with its `code`
+for a 409); read it from the response:
+
+```
+try { Invoke-RestMethod -Method Post http://localhost:8083/stock/42/adjustments -Headers @{ Authorization = "Bearer $merchant" } -ContentType 'application/json' -Body '{"delta":-1000}' } catch { (New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())).ReadToEnd() }
+```
+
+Admin
+can read every product (`GET /stock`, `GET /stock/{productId}`) but not adjust
+any. Without the key, or with a user token instead of it, `/internal/**`
+answers a bare 401. inventory-service finds identity-service's JWKS at
+`BASKETRY_IDENTITY_URL` (default `http://localhost:8080`), as merchant-service
+does. DESIGN.md Section 3 lists every endpoint and rule.
+
 ## Running a service on Postgres
 
 Each service runs on in-memory H2 by default, and on Postgres with the Spring
@@ -190,8 +234,8 @@ docker compose exec redis redis-cli GET inventory:stock:42
 A counter may differ from `stock_level.quantity` for a while (DESIGN.md
 Section 2 lists why); only the database decides a reservation, and the next
 reconciliation (at most 5 minutes) sets the counter back to the database's
-value. Never change a counter by hand to fix stock: change the database (or,
-from the next stage, use the adjustment endpoint), and the counter follows.
+value. Never change a counter by hand to fix stock: use the adjustment
+endpoint (above), and the counter follows.
 
 ## Restarting
 

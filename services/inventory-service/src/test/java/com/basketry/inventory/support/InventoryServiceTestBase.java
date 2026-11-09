@@ -23,7 +23,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -37,10 +45,23 @@ import tools.jackson.databind.json.JsonMapper;
  * test.
  */
 @SpringBootTest
+@AutoConfigureMockMvc
 @Import(TestStockCounterConfig.class)
 public abstract class InventoryServiceTestBase {
 
     protected static final long MERCHANT = 3;
+
+    /** The value of basketry.internal.api-key in the test application.properties. */
+    public static final String API_KEY = "test-only-internal-key-not-a-secret-000";
+
+    /** Tokens are verified against a fake identity-service publishing TestTokens.KEY. */
+    @DynamicPropertySource
+    static void identityServer(DynamicPropertyRegistry registry) {
+        registry.add("basketry.identity.base-url", () -> FakeIdentityServer.shared().baseUrl());
+    }
+
+    @Autowired
+    protected MockMvc mvc;
 
     @Autowired
     protected StockService stock;
@@ -126,6 +147,25 @@ public abstract class InventoryServiceTestBase {
     @SuppressWarnings("unchecked")
     protected Map<String, Object> payloadOf(OutboxEvent event) {
         return json.readValue(event.getPayload(), Map.class);
+    }
+
+    /** A request with a bearer token. */
+    protected static MockHttpServletRequestBuilder bearer(MockHttpServletRequestBuilder request, String token) {
+        return request.header(HttpHeaders.AUTHORIZATION, "Bearer " + token);
+    }
+
+    /** A request with the internal API key. */
+    protected static MockHttpServletRequestBuilder internal(MockHttpServletRequestBuilder request) {
+        return request.header("X-Internal-Api-Key", API_KEY);
+    }
+
+    /** A JSON request body. */
+    protected static MockHttpServletRequestBuilder json(MockHttpServletRequestBuilder request, String body) {
+        return request.contentType(MediaType.APPLICATION_JSON).content(body);
+    }
+
+    protected ResultActions perform(MockHttpServletRequestBuilder request) throws Exception {
+        return mvc.perform(request);
     }
 
     /** Exactly one log line contains {@code text}, and it is a WARN. */

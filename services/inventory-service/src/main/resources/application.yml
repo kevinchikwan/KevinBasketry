@@ -22,6 +22,20 @@ spring:
   flyway:
     locations: classpath:db/migration
 
+  # Errors are returned as RFC 9457 problem details, never as stack traces.
+  mvc:
+    problemdetails:
+      enabled: true
+
+  # As in identity-service: a number like 1.5 sent for a whole-number field is a
+  # 400, never truncated, and a number field takes only a JSON number: "5" or
+  # true for a delta is a 400, never converted.
+  jackson:
+    deserialization:
+      accept-float-as-int: false
+    mapper:
+      allow-coercion-of-scalars: false
+
   # The stock counters (DESIGN.md Section 2). Redis is never the source of truth,
   # so it is never needed: when it is down or slow, reservations go to the
   # PostgreSQL gate alone. Short timeouts keep a slow Redis from holding up a
@@ -51,6 +65,21 @@ management:
       enabled: false
 
 basketry:
+  identity:
+    # identity-service's JWKS, for verifying bearer tokens (DESIGN.md Section 2, Tokens).
+    base-url: ${BASKETRY_IDENTITY_URL:http://localhost:8080}
+    connect-timeout: 2s
+    read-timeout: 5s
+  internal:
+    # Shared key that catalog-service will present on /internal/**. Never
+    # committed: comes from the environment (a Kubernetes Secret when deployed),
+    # the same variable identity-service reads. Unset = every /internal/**
+    # request is refused; set = at least 32 characters.
+    api-key: ${BASKETRY_INTERNAL_API_KEY:}
+  cors:
+    # Vite's default dev-server port. Widen this (comma-separated) once the
+    # Merchant portal exists (DESIGN.md Section 1).
+    allowed-origins: http://localhost:5173
   stock-counter:
     # After a Redis failure, reservations skip Redis for this long instead of
     # waiting for a timeout every time.

@@ -1,9 +1,12 @@
 package com.basketry.inventory.stock;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.domain.Limit;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -43,6 +46,12 @@ public interface StockLevelRepository extends JpaRepository<StockLevel, Long> {
     /** A plain read, no lock: the confirming read and the counter load. */
     @Query("select s.quantity from StockLevel s where s.productId = :productId")
     Optional<Long> findQuantity(long productId);
+
+    /** GET /stock for one merchant. */
+    Page<StockLevel> findByMerchantId(long merchantId, Pageable pageable);
+
+    /** GET /internal/stock. */
+    List<StockLevel> findByProductIdInOrderByProductIdAsc(Collection<Long> productIds);
 
     /** Reconciliation's keyset paging, in product order. */
     @Query("select new com.basketry.inventory.stock.StockLevelRepository$ProductQuantity(s.productId, s.quantity)"

@@ -307,6 +307,12 @@ either order finishes. Each reservation runs these steps in order:
    leave the counter too high: a counter often says "insufficient" only
    because another request took from it and has not committed yet, and if
    that one then loses the gate, it gives its take back.
+   **The counter may be briefly negative, and that is harmless**: every take
+   on it answers "insufficient", the confirming read overrules that, and
+   reconciliation sets it back to Postgres's value. **There is deliberately no
+   floor at zero**: in the race just described, a floored subtraction would
+   leave the counter at 0, the loser's give-back would then lift it to one
+   above Postgres, and the drift this rule removes would be back.
 
 **Failed outcomes are stored too.** Otherwise a reservation that failed for
 lack of stock, redelivered after a restock, would succeed for an order that
@@ -377,8 +383,9 @@ product shows as out of stock until its merchant adds some), for the merchant
 that owns it, and is never deleted. Creating it again for the same merchant
 changes nothing; another merchant is refused
 (`PRODUCT_OWNED_BY_OTHER_MERCHANT`). catalog-service will create the row
-when a product is created; until it exists, rows are created by hand or by
-tests.
+through `POST /internal/stock` (Section 3) when a product is created; until
+it exists, rows are created by calling that endpoint by hand
+(services/README.md).
 
 **Adjustments are deltas.** A merchant adds or removes units (up to 1,000,000
 either way, never 0) in one conditional statement, so an adjustment commutes
@@ -844,6 +851,68 @@ the JDK HttpClient.
 - `POST /products` (Merchant, own products only)
 - `PATCH /products/{id}` (Merchant, own products only)
 
+**inventory-service**
+
+Reservations and releases arrive over Kafka (Section 5). The REST API serves
+the Merchant portal and Admin (FR-M4) and, internally, catalog-service
+(FR-M6). Every stock body has `productId`, `merchantId` and `quantity`, all
+JSON whole numbers read as Java longs; `quantity` is the stock still
+available, with reservations in progress already taken off (FR-M5).
+
+Bearer tokens are verified exactly as in merchant-service: identity-service's
+JWKS at `BASKETRY_IDENTITY_URL`, fetched on first use, cached, 2 s / 5 s
+timeouts, 503 (problem detail) when a token's key is not cached and the JWKS
+cannot be fetched, 401 for a malformed, expired, tampered or unpublished-key
+token or none at all. Request validation runs before the capability check: an
+invalid request is a 400 for anyone, never a 403. Every error is a problem
+detail; a 409 carries a `code`. A number with a decimal (`1.5`, also `2.0`)
+for a whole-number field is a 400, and so is `"5"` or `true` for a number:
+one global Jackson setting, as in identity-service. CORS allows
+`basketry.cors.allowed-origins` (GET and POST, no credentials).
+
+- `GET /stock` (Admin, or a merchant). Same paging as `GET /accounts`: `page`
+  from 0 (default 0), `size` 1..100 (default 20), anything out of range a 400,
+  product order, a page past the end 200 with empty `content`. Response:
+  `{content, page, size, totalElements, totalPages}`. A merchant sees only its
+  own products (the token's `merchantId` claim, which counts only with the
+  `MERCHANT` capability). Admin sees every product, or one merchant's with
+  `merchantId=` (positive, else 400); a merchant passing any `merchantId` but
+  its own gets 403. A buyer-only token gets 403.
+- `GET /stock/{productId}` (Admin, or the merchant that owns it). As
+  `GET /merchants/{code}`: ownership is known only after the lookup, so a
+  non-admin gets 403 both for another merchant's product and for one that does
+  not exist; only an admin gets a 404.
+- `POST /stock/{productId}/adjustments` (the owning merchant only; Admin can
+  view stock but not adjust it). Body `{"delta": n}`: a whole JSON number, not
+  null, not 0, at most 1,000,000 either way; any other field is a 400 naming
+  it. A non-owner (or a missing product) gets 403. Applied as one conditional
+  statement (Section 2), so it commutes with reservations in flight. 200 with
+  the stock after the change; 409 `STOCK_WOULD_GO_NEGATIVE` (fewer units
+  available than the decrease) or `STOCK_LIMIT_EXCEEDED` (an increase above
+  1,000,000). A retry after a lost response applies twice (Section 6).
+- `POST /internal/stock` (internal key only). Body
+  `{"productId": p, "merchantId": m}`, both positive whole numbers; any other
+  field is a 400 naming it (a new product always starts at 0). **201**,
+  `outcome: CREATED`: the row is created at 0. **200**, `outcome:
+  ALREADY_EXISTS`: the same merchant already has it, nothing changed. **409**
+  `PRODUCT_OWNED_BY_OTHER_MERCHANT`: the owner never changes. catalog-service
+  will call it when it creates a product (Section 6).
+- `GET /internal/stock?productIds=1,2,3` (internal key only). 1 to 100
+  positive ids, else 400. Response `{content: [{productId, quantity}]}` in
+  product order, a repeated id answered once, and products with no stock row
+  left out (catalog-service shows them as out of stock). Read from Postgres,
+  never from the Redis counters.
+- The internal endpoints follow identity-service's `/internal/**` rules
+  exactly (Section 3, identity-service): `X-Internal-Api-Key` only, from
+  `BASKETRY_INTERNAL_API_KEY` (whitespace stripped, at least 32 characters or
+  startup fails, unset = a WARN and every internal call refused), compared in
+  constant time, their own security chain that never reads `Authorization` and
+  sends no CORS headers, and the same bare 401 for a missing key, a wrong key
+  or a user JWT. The Ingress must never route them externally.
+- `GET /actuator/health` (and its `liveness` and `readiness` groups) needs no
+  token, shows no details and does not include Redis (Section 2). No other
+  actuator endpoint is exposed.
+
 **order-service**
 - `POST /orders/checkout` — starts the saga (see Section 4). The body
   carries the whole client-side cart (`productId`, `quantity` per line),
@@ -1268,10 +1337,11 @@ at-least-once delivery means duplicates are expected, not exceptional.
   stores a tombstone, so the reservation, if it arrives late, takes nothing
   (Section 2, inventory-service). Decide together with the stuck-saga handling.
 - catalog-service must create a product's stock row in inventory-service
-  when it creates the product, and retry until it succeeds. Until then the
-  product reads as out of stock, and reserving it fails with `UNKNOWN_PRODUCT`.
-  Decide the call (the internal endpoint comes with inventory-service's REST
-  API) when catalog-service is built.
+  (`POST /internal/stock`, Section 3) when it creates the product, and retry
+  until it succeeds; the call is idempotent. Until then the product reads as
+  out of stock, and reserving it fails with `UNKNOWN_PRODUCT`. Decide when
+  catalog-service is built whether it calls synchronously in its create
+  request or from an outbox.
 - Redis has no password locally (it listens on 127.0.0.1 only).
   inventory-service reads `BASKETRY_REDIS_PASSWORD`; a deployment must set it
   and configure Redis to require it. Decide at deployment, with the Redis pod.
@@ -1327,7 +1397,10 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   (also a ConfigMap) to reach Kafka. inventory-service needs
   `BASKETRY_REDIS_HOST` and `BASKETRY_REDIS_PORT` (ConfigMap) and
   `BASKETRY_REDIS_PASSWORD` (Secret; Section 6) to reach Redis, which runs as
-  its own pod with no persistent volume.
+  its own pod with no persistent volume, `BASKETRY_IDENTITY_URL` (ConfigMap)
+  for the JWKS, and `BASKETRY_INTERNAL_API_KEY` in its Secret for the calls
+  catalog-service will make to `/internal/stock`; without the key it starts,
+  but refuses every internal call.
 - The deployed profile has **no default database passwords**: each service
   gets `BASKETRY_DB_PASSWORD` from its own Secret. The `local-dev-only-…`
   defaults in `application-postgres.yml` are for local development only, and a
