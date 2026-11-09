@@ -72,12 +72,13 @@ refund request goes to `order.merchant-refund.requested` the same way, with
 `cardNumber`. Read the results, and the dead-letter topic with its headers:
 
 ```
-docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:29092 --topic order.merchant.charged --from-beginning --property print.key=true
-docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:29092 --topic order.merchant-charge.requested.DLT --from-beginning --property print.key=true --property print.headers=true
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:29092 --topic order.merchant.charged --from-beginning --property print.key=true --timeout-ms 10000
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:29092 --topic order.merchant-charge.requested.DLT --from-beginning --property print.key=true --property print.headers=true --timeout-ms 10000
 ```
 
 The other result topics are `order.merchant.declined` and
-`order.merchant.refunded`. A request with an unknown or wrongly typed field, or
+`order.merchant.refunded`. Each consumer stops after 10 s without a new record.
+A request with an unknown or wrongly typed field, or
 another `schemaVersion`, goes to the dead-letter topic (DESIGN.md Section 5).
 Request topics and dead-letter topics carry real card numbers in their values;
 only the test numbers belong there.
@@ -214,3 +215,26 @@ Kafka group until the session timeout ends. It needs ports 8080, 8082 and 9092 f
 otherwise. It uses its own Compose project (`basketry-e2e`), stops only what it
 started, and deletes only that project's data, before and after the run. Its
 exit codes are listed at the top of the script. Service logs go to `build\e2e`.
+
+`scripts/e2e-payment.ps1` does the same for payment-service: a real broker and
+a real process, with requests produced and results read by the Kafka commands
+of "Sending payment-service a request by hand" above, so those are tested too.
+It sends an approved charge, the same request again, a declined charge, a
+malformed charge carrying a sentinel card number, a refund and a refund of an
+unknown reference, then checks the results, both dead-letter topics with their
+headers, and that the sentinel is in no header and no service log line.
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\e2e-payment.ps1
+powershell -ExecutionPolicy Bypass -File scripts\e2e-payment.ps1 -Postgres
+```
+
+`-Postgres` runs payment-service on Postgres, checks the stored rows for the
+sentinel, and restarts the service halfway: a repeated charge must still get
+the same `transactionRef`. The script force-stops the service, so the restarted
+listeners wait for the old ones' session to time out (up to 45 s) before they
+get their partitions; the script reports how long that took. It needs ports
+8084 and 9092 free (with `-Postgres` also 5432, or `BASKETRY_POSTGRES_PORT`),
+uses the same Compose project as the script above (so run one at a time), and
+exits with 6 if this README no longer has the exact Kafka commands it runs.
+Its logs go to `build\e2e\payment`.

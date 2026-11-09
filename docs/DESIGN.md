@@ -1249,7 +1249,10 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   `./gradlew postgresTest` runs every test again on a real Postgres in a
   Testcontainers container, and `scripts/e2e-merchant-status.ps1` runs the whole
   status chain on a real broker and real processes (`-Postgres` adds a restart
-  of both services on Postgres).
+  of both services on Postgres). `scripts/e2e-payment.ps1` does the same for
+  payment-service's requests, results and dead-letter topics, using the Kafka
+  commands of services/README.md, so they are tested too (`-Postgres` adds a
+  restart and a repeated charge).
 - On Postgres, merchant-service's row-lock reads wait at most 5 s for another
   transaction's lock, then answer 503 `MERCHANT_BUSY` (Postgres would otherwise
   wait forever).
