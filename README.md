@@ -18,9 +18,11 @@ unfinished work as done.
 Built so far: `identity-service` and `merchant-service`, including the
 `merchant.status.changed` event between them, from the outbox to the consumer,
 and `payment-service`, with its Kafka requests, results and dead-letter topics.
-In progress: `inventory-service`, whose reservations, releases and adjustments
-(PostgreSQL as the gate, Redis as the atomic pre-check) are done; its REST API
-and Kafka side come next.
+`inventory-service` has its reservations, releases and adjustments (PostgreSQL
+as the gate, Redis as the atomic pre-check), its REST API and its Kafka side.
+In progress: `catalog-service`, whose core is done (products, the Redis listing
+cache, the stock-row outbox to inventory-service); its REST API and its
+`merchant.status.changed` consumer come next.
 [`services/README.md`](services/README.md) has the status of every service and
 how to run the end-to-end checks.
 
@@ -41,7 +43,7 @@ how to run the end-to-end checks.
 | Service | Owns |
 |---|---|
 | `identity-service` | Accounts, auth, buyer/merchant linkage |
-| `catalog-service` | Products, categories |
+| `catalog-service` | Products (with a free-text category), cached listings |
 | `merchant-service` | Merchant profile, onboarding, commission rate, KYC |
 | `inventory-service` | Stock, reserved via Redis at checkout time |
 | `payment-service` | Card/QR authorization simulator |

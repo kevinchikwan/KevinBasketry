@@ -21,7 +21,7 @@ public class RedisContextCustomizerFactory implements ContextCustomizerFactory {
 
     public static final String ENABLED = "basketry.test.redis";
 
-    /** The same image and the same no-persistence flags as docker-compose.yml. */
+    /** The same image and the same flags as docker-compose.yml: no persistence, 64 MB, volatile-lru. */
     static final String IMAGE = "redis:8.10.3-alpine";
 
     @Override
@@ -33,7 +33,8 @@ public class RedisContextCustomizerFactory implements ContextCustomizerFactory {
     private static final class SharedContainer {
         static final GenericContainer<?> INSTANCE = start(new GenericContainer<>(DockerImageName.parse(IMAGE))
                 .withExposedPorts(6379)
-                .withCommand("redis-server", "--save", "", "--appendonly", "no"));
+                .withCommand("redis-server", "--save", "", "--appendonly", "no",
+                        "--maxmemory", "64mb", "--maxmemory-policy", "volatile-lru"));
 
         private static GenericContainer<?> start(GenericContainer<?> container) {
             container.start();

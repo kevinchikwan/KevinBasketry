@@ -36,7 +36,7 @@ the owning service's API):
 | Service | Owns | Talks to |
 |---|---|---|
 | `identity-service` | Accounts, auth, buyer/merchant linkage | consumes `merchant.status.changed` (cached `merchantActive`); otherwise foundational — everything else validates tokens issued here |
-| `catalog-service` | Products, categories | `merchant-service` (merchant active/inactive), `inventory-service`, Redis (read-through cache) |
+| `catalog-service` | Products (with a free-text category) | consumes `merchant.status.changed` (cached `merchantActive`); `inventory-service` (creates stock rows, reads availability); Redis (read-through cache of listings) |
 | `merchant-service` | Merchant profile, onboarding, commission rate, KYC | `identity-service` (creating merchant login); publishes `merchant.status.changed` (Section 5) |
 | `inventory-service` | Stock counts | consumes stock reserve/release request events (Section 5), Redis (atomic pre-check) |
 | `payment-service` | Deterministic authorization mock (card-number lookup table) | — (no outbound dependencies) |
@@ -219,26 +219,171 @@ OutboxEvent                     -- one row per status change (Section 5)
 
 ### catalog-service
 ```
-Product
-  id (PK)
-  merchantId                    -- reference only, not a DB-level FK (different service's DB)
-  name, description, category
-  price: BigDecimal
-  active: boolean
-```
-`catalog-service` caches `merchantActive` locally (denormalized), updated
-by consuming a `MerchantStatusChanged` event from `merchant-service`
-rather than calling out synchronously on every product-browse request.
+Product                         -- table product
+  id (PK)                       -- from product_id_seq
+  merchantId                    -- the owner, from the token at creation; reference only; never changes
+  name                          -- trimmed, 1-100 characters
+  description                   -- trimmed, 0-2000 characters; '' when none
+  category                      -- trimmed, 1-50 characters, free text (as merchant-service's category)
+  price: BigDecimal             -- NUMERIC(12, 2); GBP, 0.01-99,999.99, at most 2 decimal places
+  active: boolean               -- true at creation; false = deactivated by its merchant
+  createdAt, updatedAt
 
-**Redis cache:** `GET /products` and `GET /products?merchantCode=` reads
-go through a cache-aside pattern — check Redis first (key
-`catalog:products:{merchantCode|"all"}`), fall through to Postgres on a
-miss, populate Redis with a short TTL (e.g. 60s). Cache is explicitly
-invalidated (not just left to expire) on product create/update/deactivate
-and on a consumed `MerchantStatusChanged` event — TTL alone would let a
-merchant's edit be invisible to buyers for up to the TTL window, which is
-a real (if minor) correctness gap worth naming rather than silently
-accepting.
+MerchantStatus                  -- table merchant_status; the local copy of Merchant.active
+  merchantId (PK)               -- reference only
+  active: boolean
+  version: long                 -- of the last merchant.status.changed event applied (Section 5)
+  updatedAt
+
+StockRowRequest                 -- table stock_row_request; the outbox of the stock-row creation
+  productId (PK, FK product)
+  merchantId                    -- the owner sent to inventory-service
+  status: PENDING | CREATED | CONFLICT | REJECTED
+  attempts, lastError           -- failed calls so far, and the latest reason
+  createdAt, completedAt        -- completedAt set exactly when the status is not PENDING
+```
+- **Field rules** (a violation is a 400 once the REST API exists; every broken
+  rule is named at once). Lengths count UTF-16 code units, as `@Size` does in
+  merchant-service, so a valid value always fits its column. A price with more
+  than 2 decimal places is refused, never rounded; trailing zeros do not count
+  (`9.990` is 9.99), as merchant-service's `@Digits`. The upper price keeps
+  1,000 units of one line far below payment-service's amount column.
+- **Categories** are a plain string on the product, not a table: no
+  requirement asks for managing them. A categories table can come later by
+  migrating the distinct strings.
+- **Never deleted.** Deactivation is `active = false`, and it can be undone.
+  Stock rows and orders keep referring to the product.
+- **Row lock.** Hibernate writes every column, so an update reads the product
+  with `SELECT ... FOR UPDATE`, waiting at most 5 s for another request's lock
+  (then 503 `PRODUCT_BUSY`), the same as merchant-service (Section 2,
+  merchant-service). The relay never writes a product row; it has its own table.
+- **Times** are stored and answered at microsecond precision, what the columns
+  keep, so an answer shows exactly what a later read returns.
+
+**The local merchant status.** `catalog-service` copies `Merchant.active`
+from `merchant.status.changed` (Section 5) instead of calling merchant-service
+on every browse request. **A merchant with no row has never changed status and
+is active at version 0**, the state of every newly onboarded merchant, so no row
+is created at onboarding or when a merchant creates a product; the listing
+reads `COALESCE(ms.active, TRUE)`. An event is applied by one statement with no
+read first, standard SQL `MERGE` (H2 has no `ON CONFLICT DO UPDATE`): insert
+the row if the merchant has none, replace it if the event's version is newer,
+otherwise change nothing. Duplicates and older events are ignored; gaps are not
+detected, because an event carries the full state. Every merchant's events are
+stored, also before it has products. On PostgreSQL two instances inserting the
+same new merchant at once can make one fail on the primary key; that is a
+database error, which the consumer retries, and the retry then updates. The
+consumer itself comes on Day 13 (Section 5).
+
+**Visibility** (FR-B3, FR-B6, FR-A3). The public listing shows a product only if
+it is active **and** its merchant is active. Products with zero stock stay
+listed and show as out of stock. A product hidden by either rule answers 404 on
+`GET /products/{id}` (Section 3), and the Buyer app shows a cart line that gets
+a 404 as "no longer available". This is the reading of FR-B3 ("products from
+active merchants") together with FR-B6 ("shown as unavailable"): hidden in the
+catalog, unavailable in the cart. The local merchant status lags the event by
+seconds, so **the real check of purchasability is order-service's re-validation
+at checkout** (`GET /internal/products`, Section 3), not the listing.
+
+**Redis cache.** `GET /products` (with or without `merchantId=` and
+`category=`) goes through a cache-aside cache in Redis. Only the public listing
+is cached: not a product's detail, not the management reads.
+- **Keys.** A listing belongs to a scope: `all`, or `m:{merchantId}` when it is
+  filtered by merchant. Each scope has a version counter,
+  `catalog:v1:ver:{scope}`, with no TTL. A page is stored under
+  `catalog:v1:list:{scope}:{version}:{c=<category, URL-encoded>|c*}:p={page}:s={size}`
+  with a TTL of 60 s. The category is URL-encoded so that free text can never
+  imitate another key. `v1` is the format of the stored page: changing it needs
+  a new prefix, so a new release never reads an old release's pages.
+- **Invalidation is a version bump, never a delete.** A product create or
+  update, an applied status event and a stock-row conflict (below) bump `all`
+  and the merchant's scope with `INCR`. Every page of those scopes is then
+  unreachable at once; the old pages simply expire. A delete would need a
+  `SCAN` over every page key, and would still have the race below.
+- **The order is what keeps it correct.** A listing reads the scope's version
+  **before** it queries Postgres, and stores the page under that version. A
+  writer bumps **after** its commit. So a page built from data older than a
+  commit is always stored under a version older than the bump that follows the
+  commit, and no later listing reads it. Reading the version after the query
+  would let a commit and bump fall between the two and put old data under the
+  new version; bumping before the commit would let a listing read the new
+  version and still see the old data. The bump refuses to run inside a
+  transaction, and two tests place exactly these races.
+- **The value** is JSON of the page's products and `totalElements`, without
+  availability, which is read from inventory-service on every listing (below)
+  and never cached. Prices are strings, so their scale survives. A page that
+  cannot be read counts as a miss and is overwritten.
+- **Redis is never needed.** Every call goes through one guard, copied from
+  inventory-service's: any error or timeout means "unavailable", the listing is
+  read from Postgres and nothing is stored, and Redis is skipped for the next
+  10 s instead of timing out on every request. Timeouts are 500 ms, and commands
+  fail at once while disconnected.
+- **When a listing can be stale:** only when a bump fails (Redis unreachable
+  just after a commit, or a crash between the commit and the bump). The old
+  pages are then served until their TTL ends, so for at most 60 s. That is the
+  one accepted gap, and order-service's re-validation does not depend on it.
+- **No stampede protection.** At a 60 s TTL and this traffic, misses go to
+  Postgres; a lock or single-flight loading would add more than it saves.
+- **Memory.** Redis is shared with inventory-service's counters and runs
+  `volatile-lru` (Section 7): pages have a TTL, so Redis may evict them; the
+  version keys and the counters have none, so it never evicts them. A test
+  checks the TTLs on a real Redis.
+
+**Availability in listings** (FR-B6, FR-M6). After the page is read, from the
+cache or from Postgres, one call to inventory-service's
+`GET /internal/stock?productIds=` (Section 3) gives the stock of its products;
+each product gets `availability`:
+- `IN_STOCK`: quantity above zero.
+- `OUT_OF_STOCK`: zero, no stock row (a new product whose row the relay has not
+  created yet), or a stock row in `CONFLICT` (below), whatever its quantity.
+- `UNKNOWN`: inventory-service did not answer: no connection, a status other
+  than 200, or no answer within 1 s (connect timeout 500 ms). Not "out of
+  stock", because a whole site shown as sold out during an outage would be
+  wrong, and checkout's reservation is the real check anyway. The Buyer app
+  decides whether an `UNKNOWN` product can go in the cart. After a failure,
+  listings skip inventory-service for 10 s (every product `UNKNOWN`) instead
+  of waiting for a timeout each time.
+
+The exact quantity is never shown. The extra latency is one local HTTP call and
+one indexed query in inventory-service: a few milliseconds, at most about 1 s
+before the skip window opens.
+
+**Stock rows** (the open item of Section 6, decided). A product's stock row in
+inventory-service is created through a **transactional outbox**: the product and
+its `stock_row_request` row are inserted in one transaction, so either both
+exist or neither does. A relay, every second, takes up to 100 `PENDING` requests
+in product order and calls `POST /internal/stock` (Section 3) for each, with no
+transaction open during a call, then records the answer in its own short
+transaction:
+
+| Answer | Status | Then |
+|---|---|---|
+| 201 `CREATED`, 200 `ALREADY_EXISTS` | `CREATED` | next request |
+| 409 `PRODUCT_OWNED_BY_OTHER_MERCHANT` | `CONFLICT`, final, an ERROR | the merchant's listings are invalidated; next request |
+| any other 4xx except 401 | `REJECTED`, final, an ERROR (a bug) | next request |
+| 401, 5xx, timeout, no connection | stays `PENDING`; `attempts` and `lastError` updated | the pass stops; waits 1, 2, 4 … up to 60 s, reset on success |
+
+- **Until the row exists**, the product reads as out of stock, and reserving it
+  fails with `UNKNOWN_PRODUCT`. inventory-service creates a row at 0, so a new
+  product is out of stock until its merchant adds some anyway.
+- **`CONFLICT`** means inventory-service already has a row for this product id
+  that belongs to another merchant: a row created by hand (services/README.md
+  shows how), or catalog-service's H2 restarted and its ids began again while
+  inventory-service kept its rows (Section 7). That row's stock is not this
+  product's, so the product is **always** out of stock, the bump makes that
+  visible at once, and order-service gets `stockRow: CONFLICT` and must refuse
+  the line. Without this state, the listing would show, and a checkout would
+  reserve, another merchant's stock under this product id.
+- **A mark only moves a `PENDING` row**, so a final status never changes, and
+  two instances that both handle a request (a rolling update) both get 201/200
+  and mark once. Requests need no order between them; stopping the pass on a
+  retryable failure only saves calls that would fail the same way.
+- Without `BASKETRY_INTERNAL_API_KEY`, every call gets 401: the relay keeps
+  retrying with an ERROR in the log, and listings show `UNKNOWN`.
+- Rejected alternatives: a synchronous call after the commit with a retry job
+  needs the same pending marker, without the atomicity; a call inside the create
+  request would answer 503 while inventory-service is down. Requests in a column
+  of `product` would make the relay a second writer of product rows.
 
 ### inventory-service
 ```
@@ -853,9 +998,21 @@ the JDK HttpClient.
   objects mask the password in `toString`.
 
 **catalog-service**
-- `GET /products?merchantCode=`
+
+*(The contracts below are the shape approved for Day 12; they are written out in
+full with the REST API, Stage 2.)*
+- `GET /products?merchantId=&category=&page=&size=` (public). Filters by
+  `merchantId`, not by merchant code: `merchant.status.changed` carries the code
+  only after a merchant's first status change, and no token or endpoint gives a
+  buyer the code of a merchant that never changed status. Only visible products
+  (Section 2, catalog-service: active, of an active merchant), each with
+  `availability`.
+- `GET /products/{id}` (public). 404 for a product the listing hides.
 - `POST /products` (Merchant, own products only)
-- `PATCH /products/{id}` (Merchant, own products only)
+- `PATCH /products/{id}` (Merchant, own products only; `active: false`
+  deactivates)
+- `GET /internal/products?ids=` (internal key; for order-service's
+  re-validation at checkout, which is the real purchasability check)
 
 **inventory-service**
 
@@ -1048,8 +1205,8 @@ consumes it, see below; catalog-service comes later):
   merchant yet assumes it is active at version 0, which is how every merchant
   starts, until the first event arrives. identity-service has its own rule for
   an event with no linked account, below.
-- **`merchantCode`** is carried because catalog-service filters products
-  by code.
+- **`merchantCode`** is carried for tracing; no consumer needs it.
+  catalog-service filters products by `merchantId` (Section 3).
 - **Topic:** 3 partitions, replication factor 1, default retention (7 days; see
   Section 6). The partition count is fixed, because changing it moves keys between partitions
   and breaks per-merchant order. merchant-service creates the topic itself, on
@@ -1437,14 +1594,13 @@ at-least-once delivery means duplicates are expected, not exceptional.
   that never answered, it must still send the release: inventory-service then
   stores a tombstone, so the reservation, if it arrives late, takes nothing
   (Section 2, inventory-service). Decide together with the stuck-saga handling.
-- catalog-service must create a product's stock row in inventory-service
-  (`POST /internal/stock`, Section 3) when it creates the product, and retry
-  until it succeeds; the call is idempotent. Until then the product reads as
-  out of stock, and reserving it fails with `UNKNOWN_PRODUCT`. Decide when
-  catalog-service is built whether it calls synchronously in its create
-  request or from an outbox.
+- **Decided** (was open): catalog-service creates a product's stock row in
+  inventory-service from a transactional outbox, written with the product and
+  relayed to `POST /internal/stock` with retries; a row of another merchant
+  becomes a final `CONFLICT` and the product stays out of stock (Section 2,
+  catalog-service).
 - Redis has no password locally (it listens on 127.0.0.1 only).
-  inventory-service reads `BASKETRY_REDIS_PASSWORD`; a deployment must set it
+  inventory-service and catalog-service read `BASKETRY_REDIS_PASSWORD`; a deployment must set it
   and configure Redis to require it. Decide at deployment, with the Redis pod.
 - Postgres on the cluster: one Postgres pod holding one database per service
   (as in local development), or one pod per service (as Section 7 says now).
@@ -1500,8 +1656,14 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   `BASKETRY_REDIS_PASSWORD` (Secret; Section 6) to reach Redis, which runs as
   its own pod with no persistent volume, `BASKETRY_IDENTITY_URL` (ConfigMap)
   for the JWKS, and `BASKETRY_INTERNAL_API_KEY` in its Secret for the calls
-  catalog-service will make to `/internal/stock`; without the key it starts,
-  but refuses every internal call.
+  catalog-service makes to `/internal/stock`; without the key it starts,
+  but refuses every internal call. catalog-service needs the same Redis
+  settings, `BASKETRY_INVENTORY_URL` (ConfigMap) for `/internal/stock`, and
+  `BASKETRY_INTERNAL_API_KEY` in its Secret; without the key it starts with a
+  WARN, but inventory-service refuses its stock-row creation and stock reads
+  (401), so new products stay out of stock and listings show availability
+  `UNKNOWN`. Its Redis is the same pod as inventory-service's, which runs
+  `volatile-lru` there too (Section 7, Local development).
 - The deployed profile has **no default database passwords**: each service
   gets `BASKETRY_DB_PASSWORD` from its own Secret. The `local-dev-only-…`
   defaults in `application-postgres.yml` are for local development only, and a
@@ -1522,22 +1684,32 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
 
 - The root `docker-compose.yml` runs one Kafka broker in KRaft mode
   (`apache/kafka:4.2.2`, the same 4.2 line as the client), one Redis
-  (`redis:8.10.3-alpine`) for inventory-service's stock counters, and, with the
+  (`redis:8.10.3-alpine`) for inventory-service's stock counters and
+  catalog-service's listing cache, and, with the
   Compose profile `postgres`, one Postgres (`postgres:17.11-alpine`) holding a
   database and a user per service (`identity`, `merchant`, `payment`,
-  `inventory`). `docker compose up -d --wait` starts Kafka and Redis;
+  `inventory`, `catalog`). `docker compose up -d --wait` starts Kafka and Redis;
   `docker compose --profile postgres up -d --wait` starts all three. Services
   run from IntelliJ reach Kafka at `localhost:9092` (other containers on the
   Compose network at `kafka:29092`), Redis at `localhost:6379`
   (`BASKETRY_REDIS_PORT` if that port is taken) and Postgres at
   `localhost:5432` (`BASKETRY_POSTGRES_PORT`). All three bind to 127.0.0.1 only.
 - **Redis keeps nothing**: no RDB snapshots, no AOF, no volume, so every start
-  is empty and inventory-service reloads the counters from its database
-  (Section 2). It holds no data of record, so the volume rules below do not
-  concern it, and a stale counter can never outlive a wiped database. It has no
-  password locally; `maxmemory` is 64 MB with `noeviction`, so a full Redis
-  fails writes (inventory-service then uses Postgres alone) instead of silently
-  dropping counters.
+  is empty, inventory-service reloads the counters from its database and
+  catalog-service refills its cache (Section 2). It holds no data of record, so
+  the volume rules below do not concern it, and a stale counter or page can
+  never outlive a wiped database. It has no password locally.
+- **Redis memory: 64 MB with `volatile-lru`** (was `noeviction` until
+  catalog-service shared it). `volatile-lru` evicts only keys with a TTL, which
+  are catalog-service's cached pages (60 s each, about 50 KB for a full page, so
+  room for about a thousand). inventory-service's counters and catalog-service's
+  version keys have no TTL, so they are never evicted; if memory ever fills with
+  them alone, writes fail exactly as with `noeviction` (inventory-service then
+  uses Postgres alone) instead of silently dropping a counter. postgresTest
+  checks on a real Redis, started with the same flags, that a counter and a
+  version key have TTL -1. **Never give an inventory counter a TTL.** Separate
+  Redis databases would not help (they share `maxmemory` and the policy); a
+  second Redis would isolate them at the cost of another pod's memory.
 - Each service runs on in-memory H2 by default, and on Postgres with its Spring
   profile `postgres` (`application-postgres.yml`). Flyway runs the same
   migrations on both, and Hibernate only validates the schema.
@@ -1545,7 +1717,8 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   together**, because each depends on the other: Postgres holds the merchant
   versions, the payment transactions and both outboxes, Kafka the events already
   sent and the consumers' positions. inventory-service's stock rows,
-  reservations and outbox are in Postgres too. Two rules:
+  reservations and outbox are in Postgres too, and so are catalog-service's
+  products and stock-row requests. Two rules:
   - `docker compose down` stops everything and keeps all data.
   - `docker compose down -v` wipes all data, Kafka's and Postgres's, also when
     the `postgres` profile is not given.
@@ -1568,21 +1741,30 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   inventory-service loses every stock row, every reservation and any `PENDING`
   result: a repeated reserve is then decided again (`UNKNOWN_PRODUCT` until the
   stock rows are created again), and a release of an old reservation stores a
-  tombstone and gives nothing back. On Postgres each service can be restarted
-  on its own.
+  tombstone and gives nothing back. Restarting only catalog-service loses every
+  product and starts product ids at 1 again, while inventory-service keeps the
+  stock rows of the old ids: a new product of the same merchant then silently
+  takes over the old product's stock row (200 `ALREADY_EXISTS`), and one of
+  another merchant gets a stock-row `CONFLICT` and stays out of stock for good
+  (Section 2, catalog-service). Its local merchant statuses are lost too, and
+  every merchant reads as active until its next status event. On Postgres each
+  service can be restarted on its own.
 - **Interim:** REQUIREMENTS asks for the whole system to start with one
   documented command. For now Compose holds Kafka, Redis and Postgres, and the
   services run from IntelliJ. The rest joins as each piece is built.
 - The default build (`./gradlew build`) needs no Docker: it runs on H2, every
   service's Kafka tests use an embedded KRaft broker (its data goes to the
   system temp directory: the broker's test kit ignores `log.dir` and
-  `log.dirs`), and inventory-service's
+  `log.dirs`), inventory-service's
   tests use an in-memory fake of the stock counter that passes the same contract
-  tests as the Redis one. Two checks need Docker:
+  tests as the Redis one, and catalog-service's tests use an in-memory fake of
+  the listing cache (the same contract tests as Redis) and a fake
+  inventory-service over real HTTP. Two checks need Docker:
   `./gradlew postgresTest` runs every test again on a real Postgres in a
-  Testcontainers container (for inventory-service also on a real Redis, the same
-  image as Compose, so the Lua scripts, their atomicity under 16 threads and the
-  oversell test run on the real stores), and `scripts/e2e-merchant-status.ps1` runs the whole
+  Testcontainers container (for inventory-service and catalog-service also on a
+  real Redis, the same image and flags as Compose, so the Lua scripts, their
+  atomicity under 16 threads, the oversell test and the cache's TTLs run on the
+  real stores), and `scripts/e2e-merchant-status.ps1` runs the whole
   status chain on a real broker and real processes (`-Postgres` adds a restart
   of both services on Postgres). `scripts/e2e-payment.ps1` does the same for
   payment-service's requests, results and dead-letter topics, using the Kafka

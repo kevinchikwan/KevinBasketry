@@ -1,0 +1,76 @@
+server:
+  # Fixed port map in services/README.md.
+  port: 8081
+
+spring:
+  application:
+    name: catalog-service
+
+  # Default: in-memory H2 in PostgreSQL mode, emptied on every restart. The
+  # "postgres" profile (application-postgres.yml) keeps the data in PostgreSQL.
+  datasource:
+    url: jdbc:h2:mem:catalog;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    username: sa
+    password: ""
+
+  # Flyway owns the schema; Hibernate only checks that the entities match it.
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+
+  flyway:
+    locations: classpath:db/migration
+
+  # The listing cache (DESIGN.md Section 2). Redis is never the source of truth,
+  # so it is never needed: when it is down or slow, listings are read from the
+  # database. Short timeouts keep a slow Redis from holding up a listing;
+  # RedisClientConfig makes commands fail at once while disconnected.
+  data:
+    redis:
+      host: ${BASKETRY_REDIS_HOST:localhost}
+      port: ${BASKETRY_REDIS_PORT:6379}
+      # Empty locally (Compose's Redis listens on 127.0.0.1 only). A deployment
+      # sets it from a Kubernetes Secret (DESIGN.md Section 7).
+      password: ${BASKETRY_REDIS_PASSWORD:}
+      connect-timeout: 500ms
+      timeout: 500ms
+
+  # One timer, the stock-row relay.
+  task:
+    scheduling:
+      pool:
+        size: 1
+
+basketry:
+  internal:
+    # Shared key: catalog-service sends it to inventory-service's /internal/stock
+    # (and, from Stage 2, requires it on its own /internal/**). Never committed:
+    # comes from the environment (a Kubernetes Secret when deployed), the same
+    # variable the other services read. Unset = a WARN at startup, and
+    # inventory-service answers every call 401; set = at least 32 characters.
+    api-key: ${BASKETRY_INTERNAL_API_KEY:}
+  inventory:
+    # inventory-service's /internal/stock: stock-row creation and stock reads.
+    base-url: ${BASKETRY_INVENTORY_URL:http://localhost:8083}
+    # Short: a listing waits for the stock read. A slower answer counts as
+    # inventory-service being unavailable, and the listing shows UNKNOWN.
+    connect-timeout: 500ms
+    read-timeout: 1s
+    # After a failed stock read, listings skip inventory-service for this long
+    # (availability UNKNOWN) instead of waiting for a timeout every time.
+    skip-after-failure: 10s
+  cache:
+    # How long a cached listing page lives. Writes invalidate at once (a new
+    # version of the scope); the TTL only removes pages nobody reads any more.
+    ttl: 60s
+    # After a Redis failure, listings skip Redis for this long.
+    skip-after-failure: 10s
+  stock-rows:
+    relay:
+      enabled: true
+      interval: 1s
+      batch-size: 100
+      # After a failed pass: wait 1s, 2s, 4s ... up to 60s. A success resets it.
+      backoff-initial: 1s
+      backoff-max: 60s

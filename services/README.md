@@ -7,7 +7,7 @@ they talk to each other.
 | Service | Local port | Status |
 |---|---|---|
 | `identity-service` | 8080 | In progress |
-| `catalog-service` | 8081 | Not started |
+| `catalog-service` | 8081 | In progress |
 | `merchant-service` | 8082 | In progress |
 | `inventory-service` | 8083 | In progress |
 | `payment-service` | 8084 | In progress |
@@ -40,10 +40,13 @@ containers on the Compose network to `kafka:29092`), to Redis at
 to 5433) for Compose **and** the services; for 6379 the same with
 `BASKETRY_REDIS_PORT`.
 
-Redis holds only inventory-service's stock counters, which mirror its database.
-It keeps nothing: no snapshots, no append-only file, no volume. Every start is
-empty, and inventory-service reloads the counters from its database at startup,
-every 5 minutes, and whenever one is missing.
+Redis holds inventory-service's stock counters, which mirror its database, and
+catalog-service's cache of product listings. It keeps nothing: no snapshots, no
+append-only file, no volume. Every start is empty: inventory-service reloads the
+counters from its database at startup, every 5 minutes, and whenever one is
+missing, and catalog-service fills its cache again as listings are read. It runs
+with 64 MB and `volatile-lru`: when full, it evicts cached listing pages (they
+have a TTL) and never a stock counter (no TTL; DESIGN.md Section 7).
 
 All four services also run without Kafka. merchant-service:
 `PATCH` still works and the events wait in its outbox until the broker is back.
@@ -54,7 +57,27 @@ meanwhile. inventory-service: the REST API still works, the request listeners
 connect once the broker is back, and results wait in its outbox meanwhile. It
 also runs without Redis: reservations are then
 decided by its database alone, still correctly, and it logs one WARN per outage.
-Without their database the services do not start.
+catalog-service does not use Kafka yet (its status consumer comes next). It runs
+without Redis (listings are then read from its database, one WARN per outage)
+and without inventory-service (listings show availability `UNKNOWN`, and new
+products wait for their stock row, which the relay creates once inventory-service
+is back). Without their database the services do not start.
+
+## catalog-service so far
+
+Stage 1 of catalog-service is the core: products, the local merchant status,
+the listing cache in Redis and the stock-row relay. It has no REST API yet, so
+there is nothing to call by hand; the commands to create and list products come
+with the API. It starts like the others (`.\gradlew.bat :catalog-service:bootRun`,
+port 8081) and reaches inventory-service at `BASKETRY_INVENTORY_URL` (default
+`http://localhost:8083`).
+
+Set `BASKETRY_INTERNAL_API_KEY` to the same value as inventory-service's.
+Without it, catalog-service starts with a WARN, but inventory-service answers
+every call 401: the stock-row relay keeps retrying (with an ERROR in the log and
+backing off up to 60 s), so new products stay out of stock, and listings show
+availability `UNKNOWN`. Once the key is set and catalog-service restarted, the
+relay creates every waiting stock row.
 
 ## Sending payment-service a request by hand
 
@@ -96,8 +119,11 @@ only the test numbers belong there.
 
 ## Trying inventory-service's REST API by hand
 
-catalog-service does not exist yet, so stock rows are created through the
-internal endpoint it will use. Start identity-service, merchant-service and
+To try inventory-service on its own, create a stock row through the internal
+endpoint catalog-service uses for the products it creates. Product 42 here is
+made up: if catalog-service also runs and creates its own product 42 for another
+merchant, that product gets a stock-row `CONFLICT` and stays out of stock
+(DESIGN.md Section 2, catalog-service). Start identity-service, merchant-service and
 inventory-service (H2 is fine; Redis optional, Kafka not needed), each from a
 PowerShell window in which the same internal key is set first (any value of at
 least 32 characters):
@@ -190,19 +216,20 @@ the first start.
   ```
 
   After stopping `bootRun`, check that no JVM is still holding the port
-  (8080, 8082, 8083 or 8084); stop it if there is.
+  (8080 to 8084); stop it if there is.
 
 | Variable | Default (local only) | Used by |
 |---|---|---|
 | `BASKETRY_POSTGRES_HOST` | `localhost` | every service |
 | `BASKETRY_POSTGRES_PORT` | `5432` | Compose and every service |
-| `BASKETRY_DB_USERNAME` | `identity` / `merchant` / `payment` / `inventory` | each service |
-| `BASKETRY_DB_PASSWORD` | `local-dev-only-identity` / `local-dev-only-merchant` / `local-dev-only-payment` / `local-dev-only-inventory` | each service |
-| `BASKETRY_IDENTITY_DB_PASSWORD`, `BASKETRY_MERCHANT_DB_PASSWORD`, `BASKETRY_PAYMENT_DB_PASSWORD`, `BASKETRY_INVENTORY_DB_PASSWORD` | the same four values | Compose's init script |
+| `BASKETRY_DB_USERNAME` | `identity` / `merchant` / `payment` / `inventory` / `catalog` | each service |
+| `BASKETRY_DB_PASSWORD` | `local-dev-only-identity` / `local-dev-only-merchant` / `local-dev-only-payment` / `local-dev-only-inventory` / `local-dev-only-catalog` | each service |
+| `BASKETRY_IDENTITY_DB_PASSWORD`, `BASKETRY_MERCHANT_DB_PASSWORD`, `BASKETRY_PAYMENT_DB_PASSWORD`, `BASKETRY_INVENTORY_DB_PASSWORD`, `BASKETRY_CATALOG_DB_PASSWORD` | the same five values | Compose's init script |
 | `BASKETRY_POSTGRES_ADMIN_PASSWORD` | `local-dev-only-admin` (user `postgres`) | Compose |
-| `BASKETRY_REDIS_HOST` | `localhost` | inventory-service |
-| `BASKETRY_REDIS_PORT` | `6379` | Compose and inventory-service |
-| `BASKETRY_REDIS_PASSWORD` | empty (no password locally) | inventory-service |
+| `BASKETRY_REDIS_HOST` | `localhost` | inventory-service, catalog-service |
+| `BASKETRY_REDIS_PORT` | `6379` | Compose, inventory-service, catalog-service |
+| `BASKETRY_REDIS_PASSWORD` | empty (no password locally) | inventory-service, catalog-service |
+| `BASKETRY_INVENTORY_URL` | `http://localhost:8083` | catalog-service |
 
 The defaults are for local development only, and a service logs a WARN at
 startup when it uses one. Each service has its own database and user, and no
@@ -225,6 +252,17 @@ docker compose exec postgres psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE
 This does what the init script would have done for `inventory`. A volume that
 also predates `payment` needs the same three statements for `payment`.
 
+**The `catalog` database is new too.** The same choice: `docker compose down -v`
+(wiping everything), or, keeping all data, create it in the running container
+(change the password if you overrode `BASKETRY_CATALOG_DB_PASSWORD`):
+
+```
+docker compose exec postgres psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE catalog LOGIN PASSWORD 'local-dev-only-catalog';" -c "CREATE DATABASE catalog OWNER catalog;" -c "REVOKE CONNECT, TEMPORARY ON DATABASE catalog FROM PUBLIC;"
+```
+
+The Redis change to `volatile-lru` needs nothing: Redis keeps no data, so
+`docker compose up -d --wait` recreates it with the new setting.
+
 ## Looking at the data
 
 **psql**, for everyone, while the Compose Postgres runs:
@@ -234,6 +272,7 @@ docker compose exec postgres psql -U identity identity
 docker compose exec postgres psql -U merchant merchant
 docker compose exec postgres psql -U payment payment
 docker compose exec postgres psql -U inventory inventory
+docker compose exec postgres psql -U catalog catalog
 ```
 
 Then for example `\dt`, `select * from account;`, `\q` to quit.
@@ -256,9 +295,11 @@ Download the driver files if asked, click *Test Connection*, and on the
 browsing cannot change a row by accident. The tables: `account`,
 `admin_account` (identity), `merchant`, `outbox_event` (merchant),
 `payment_transaction`, `outbox_event` (payment), `stock_level`,
-`stock_reservation`, `outbox_event` (inventory), and `flyway_schema_history` in
+`stock_reservation`, `outbox_event` (inventory), `product`, `merchant_status`,
+`stock_row_request` (catalog), and `flyway_schema_history` in
 each. For inventory-service, use `inventory` as user and database and
-`local-dev-only-inventory` as password. `payment_transaction` holds only the
+`local-dev-only-inventory` as password; for catalog-service, `catalog` and
+`local-dev-only-catalog`. `payment_transaction` holds only the
 last 4 digits of a card number, never the full number.
 
 **The stock counters in Redis**, while Compose runs (one key per product,
@@ -275,6 +316,19 @@ reconciliation (at most 5 minutes) sets the counter back to the database's
 value. Never change a counter by hand to fix stock: use the adjustment
 endpoint (above), and the counter follows.
 
+**catalog-service's listing cache** has a version per scope
+(`catalog:v1:ver:all`, `catalog:v1:ver:m:<merchantId>`) and pages under
+`catalog:v1:list:...` that expire after 60 s. A product change bumps the
+versions, so old pages are never read again:
+
+```
+docker compose exec redis redis-cli --scan --pattern "catalog:v1:*"
+docker compose exec redis redis-cli TTL catalog:v1:ver:all
+```
+
+A version answers TTL `-1` (never evicted), a page a number up to 60.
+Deleting cache keys by hand is safe but never needed.
+
 ## Restarting
 
 Kafka and Postgres are kept or wiped together, because each depends on the
@@ -286,7 +340,8 @@ back.
 
 - **On Postgres**, each service can be restarted on its own.
 - **Redis** can be restarted or wiped at any time: it holds nothing that
-  inventory-service cannot reload from its database.
+  inventory-service cannot reload from its database, or catalog-service cannot
+  read again.
 - **On H2**, every restart empties that service's database. Restart **all**
   services and run `docker compose down -v` together, whichever one you meant
   to restart. Restarting only merchant-service resets its merchant ids and
@@ -299,7 +354,11 @@ back.
   dead-letter topic. Restarting only inventory-service loses every stock row,
   reservation and unpublished result: a repeated reserve is decided again
   (`UNKNOWN_PRODUCT` until the stock rows are created again), and a release of
-  an old reservation stores a tombstone and gives nothing back.
+  an old reservation stores a tombstone and gives nothing back. Restarting only
+  catalog-service loses every product and starts the ids at 1 again, while
+  inventory-service keeps the old stock rows: a new product takes over an old
+  one's stock row (same merchant) or stays out of stock with a `CONFLICT` (another
+  merchant), and every merchant reads as active until its next status change.
 
 ## Tests
 
@@ -321,12 +380,17 @@ do not use the `postgres` profile, only its database). Tests tagged `postgres`
 run only there: they check that the run really is on Postgres, that each
 service starts with its real `postgres` profile, and the 5 s row-lock timeout.
 
-inventory-service's `postgresTest` also starts one Testcontainers Redis (the
-Compose image, with the same no-persistence flags) and runs every test against
-it with the real Lua scripts. Its default `test` uses an in-memory fake counter
+inventory-service's and catalog-service's `postgresTest` also start one
+Testcontainers Redis (the Compose image, with the same flags: no persistence,
+64 MB, `volatile-lru`) and run every test against it, inventory-service's with
+the real Lua scripts. Its default `test` uses an in-memory fake counter
 instead, which passes the same contract tests. Tests tagged `redis` run only in
 `postgresTest`: the contract against Redis, 16 threads taking the last unit 100
-times over, and a check that the run really is on Redis 8.10.3.
+times over, a check that the run really is on Redis 8.10.3, and that a counter
+has no TTL. catalog-service's default `test` uses an in-memory fake of the
+listing cache (the same contract tests as Redis) and a fake inventory-service
+over real HTTP; its `redis` tests check the contract on Redis, that a page has
+its TTL and a version key none, and Redis's memory policy.
 
 ## End-to-end check
 

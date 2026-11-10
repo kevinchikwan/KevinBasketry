@@ -8,7 +8,7 @@
 # Kafka and Postgres both keep their data in named volumes, so they are kept or
 # wiped together: "down" keeps both, "down -v" deletes both (also the Postgres
 # volume when the profile is off). Redis keeps nothing: it only mirrors stock
-# counts that inventory-service reloads from its database. Services on in-memory
+# counts that inventory-service reloads from its database, and caches listings. Services on in-memory
 # H2 lose their data on every restart, so with H2 use "down -v"
 # (services/README.md, "Restarting").
 services:
@@ -50,9 +50,10 @@ services:
       retries: 20
       start_period: 10s
 
-  # inventory-service's stock counters (DESIGN.md Section 2). Never the source of
-  # truth: no persistence and no volume, so every start is empty and
-  # inventory-service reloads the counters from its database. A stale counter
+  # inventory-service's stock counters and catalog-service's listing cache
+  # (DESIGN.md Section 2). Never the source of truth: no persistence and no
+  # volume, so every start is empty, inventory-service reloads the counters from
+  # its database and catalog-service refills the cache. A stale counter or page
   # can therefore never outlive a wiped database.
   redis:
     image: redis:8.10.3-alpine
@@ -60,10 +61,13 @@ services:
       # Services run from IntelliJ connect to localhost:6379. Local machine only.
       # Set BASKETRY_REDIS_PORT if 6379 is taken; inventory-service reads the same variable.
       - "127.0.0.1:${BASKETRY_REDIS_PORT:-6379}:6379"
-    # No RDB snapshots, no AOF. The counters are tiny; noeviction, so a full
-    # memory limit fails writes (inventory-service then uses PostgreSQL alone)
-    # instead of silently dropping counters.
-    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "64mb", "--maxmemory-policy", "noeviction"]
+    # No RDB snapshots, no AOF. volatile-lru evicts only keys with a TTL:
+    # catalog-service's cached pages. inventory-service's counters and
+    # catalog-service's version keys have none, so they are never evicted; if
+    # memory ever fills with them alone, writes fail as with noeviction
+    # (inventory-service then uses PostgreSQL alone) instead of silently
+    # dropping a counter.
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "64mb", "--maxmemory-policy", "volatile-lru"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -92,6 +96,7 @@ services:
       BASKETRY_MERCHANT_DB_PASSWORD: ${BASKETRY_MERCHANT_DB_PASSWORD:-local-dev-only-merchant}
       BASKETRY_PAYMENT_DB_PASSWORD: ${BASKETRY_PAYMENT_DB_PASSWORD:-local-dev-only-payment}
       BASKETRY_INVENTORY_DB_PASSWORD: ${BASKETRY_INVENTORY_DB_PASSWORD:-local-dev-only-inventory}
+      BASKETRY_CATALOG_DB_PASSWORD: ${BASKETRY_CATALOG_DB_PASSWORD:-local-dev-only-catalog}
     healthcheck:
       # Over TCP on purpose: while the init script runs, Postgres listens only on
       # its socket, so a socket check could pass before the databases exist.
