@@ -29,9 +29,10 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
  * <ul>
  *   <li>/internal/**, checked first: the shared API key only, never a user
  *       JWT, no CORS; anything else is a bare 401. As inventory-service.</li>
- *   <li>The public reads, {@code GET /products} and {@code GET /products/{id}}
- *       only: open to everyone, and <b>no bearer processing at all</b>. An
- *       expired or broken token the Buyer app still sends is ignored, so
+ *   <li>The public reads, GET and HEAD on {@code /products} and
+ *       {@code /products/{id}} only: open to everyone, and <b>no bearer
+ *       processing at all</b>. An expired or broken token the Buyer app still
+ *       sends is ignored, so
  *       browsing never becomes a 401 (which would log the buyer out), and the
  *       JWKS is never needed, so identity-service being down never makes
  *       browsing a 503. Matched by method too: POST and PATCH on the same
@@ -108,12 +109,18 @@ public class SecurityConfig {
         return http.build();
     }
 
-    /** GET only: the same paths with POST or PATCH are a merchant's writes, in the authenticated chain. */
+    /**
+     * GET and HEAD only (Spring MVC answers HEAD from the GET mapping, without a
+     * body): the same paths with POST or PATCH are a merchant's writes, in the
+     * authenticated chain.
+     */
     static RequestMatcher publicReads() {
         PathPatternRequestMatcher.Builder paths = PathPatternRequestMatcher.withDefaults();
         return new OrRequestMatcher(
                 paths.matcher(HttpMethod.GET, "/products"),
-                paths.matcher(HttpMethod.GET, "/products/{id}"));
+                paths.matcher(HttpMethod.HEAD, "/products"),
+                paths.matcher(HttpMethod.GET, "/products/{id}"),
+                paths.matcher(HttpMethod.HEAD, "/products/{id}"));
     }
 
     /**
@@ -126,7 +133,7 @@ public class SecurityConfig {
             @Value("${basketry.cors.allowed-origins}") List<String> allowedOrigins) {
         CorsConfiguration config = new CorsConfiguration();
         config.setAllowedOrigins(allowedOrigins);
-        config.setAllowedMethods(List.of("GET", "POST", "PATCH"));
+        config.setAllowedMethods(List.of("GET", "HEAD", "POST", "PATCH"));
         config.setAllowedHeaders(List.of("Authorization", "Content-Type"));
         config.setAllowCredentials(false);
         config.setMaxAge(3600L);

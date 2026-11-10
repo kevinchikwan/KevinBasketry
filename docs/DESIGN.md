@@ -1008,8 +1008,9 @@ the JDK HttpClient.
 **catalog-service**
 
 Three security chains:
-- **Public reads**, `GET /products` and `GET /products/{id}` only (matched by
-  method: POST and PATCH on the same paths are not public). No token is needed,
+- **Public reads**, GET and HEAD on `/products` and `/products/{id}` only
+  (matched by method: POST and PATCH on the same paths are not public; HEAD
+  answers as GET without a body). No token is needed,
   and **none is ever read**: an expired, broken or foreign token the Buyer app
   still sends is ignored, so browsing never becomes a 401 (which would log the
   buyer out), and the JWKS is never fetched, so identity-service being down
@@ -1029,8 +1030,8 @@ As everywhere: request validation runs before the capability check, so an
 invalid request is a 400 for anyone, never a 403. Every error is a problem
 detail. A field takes only its own JSON type: `"2.50"` for a price, `0` or
 `"false"` for a boolean, `5` for a string, and `1.5` for a whole number are
-400s, never converted. CORS allows `basketry.cors.allowed-origins` (GET, POST
-and PATCH, no credentials). Product fields and their rules: Section 2.
+400s, never converted. CORS allows `basketry.cors.allowed-origins` (GET, HEAD,
+POST and PATCH, no credentials). Product fields and their rules: Section 2.
 
 - `GET /products` (public; FR-B3). Paging as `GET /accounts`: `page` from 0
   (default 0), `size` 1..100 (default 20), anything out of range a 400, id
@@ -1047,7 +1048,8 @@ and PATCH, no credentials). Product fields and their rules: Section 2.
 - `GET /products/{id}` (public). The listing's fields, with its own
   availability. **404 for a product the listing hides** (inactive, or of an
   inactive merchant), as for one that does not exist; the Buyer app shows a cart
-  line that gets a 404 as "no longer available". Not cached.
+  line that gets a 404 as "no longer available". A non-numeric or non-positive
+  id is a 400. Not cached.
 - `POST /products` (FR-M2; a token with `MERCHANT`). Body `name`, `category`,
   `price` required, `description` optional. The owner is the token's
   `merchantId`, never a field: any other field (`merchantId`, `active` …) is a
@@ -1079,7 +1081,8 @@ and PATCH, no credentials). Product fields and their rules: Section 2.
   a 404.
 - `GET /internal/products?ids=1,2,3` (internal key; for order-service's
   re-validation of every checkout line, **the real check of purchasability**).
-  1 to 100 positive ids, else 400. Response `{content: [...]}` in id order, a
+  1 to 100 positive ids, else 400. The limit counts repeated ids; `1,,2` is a
+  400. Response `{content: [...]}` in id order, a
   repeated id answered once, unknown ids left out. Each item `id`, `merchantId`,
   `name`, `price` (the current one), `active`, `merchantActive`, `stockRow`
   (all four statuses). Hidden products are included, so order-service can tell

@@ -1,6 +1,7 @@
 package com.basketry.catalog.web;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.head;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -100,6 +101,13 @@ class PublicProductEndpointTests extends CatalogServiceTestBase {
         perform(get("/products/0")).andExpect(status().isBadRequest());
     }
 
+    /** Mutation: the id read as text, anything not a positive number answered 404. */
+    @Test
+    void aNonNumericIdIs400() throws Exception {
+        perform(get("/products/abc")).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400));
+    }
+
     /**
      * The public chain never reads a token: an expired, a garbage, or a
      * foreign-key token still gets 200 on both reads, so the Buyer app is never
@@ -117,5 +125,27 @@ class PublicProductEndpointTests extends CatalogServiceTestBase {
             perform(bearer(get("/products/" + tea), token)).andExpect(status().isOk());
         }
         perform(get("/products/" + tea).header("Authorization", "Basic dXNlcjpwYXNz")).andExpect(status().isOk());
+    }
+
+    /**
+     * HEAD on the public reads is public too, also with a garbage token
+     * ({@link HeadOverHttpTests} checks on a real port that no body is sent:
+     * MockMvc keeps the body Tomcat drops). HEAD elsewhere stays in its own
+     * chain: 401 without a token or the key. Mutation: remove HEAD from the
+     * public matcher (the first four would be 401).
+     */
+    @Test
+    void headOnThePublicReadsIs200() throws Exception {
+        long tea = givenProduct(MERCHANT, "Tea").id();
+
+        for (String path : List.of("/products", "/products/" + tea)) {
+            perform(head(path)).andExpect(status().isOk());
+            perform(bearer(head(path), "garbage")).andExpect(status().isOk());
+        }
+        perform(head("/manage/products")).andExpect(status().isUnauthorized());
+        perform(bearer(head("/manage/products"), "garbage")).andExpect(status().isUnauthorized());
+        perform(head("/internal/products").param("ids", Long.toString(tea))).andExpect(status().isUnauthorized());
+        perform(bearer(head("/internal/products").param("ids", Long.toString(tea)), "garbage"))
+                .andExpect(status().isUnauthorized());
     }
 }

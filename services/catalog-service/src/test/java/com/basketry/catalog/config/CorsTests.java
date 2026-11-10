@@ -1,6 +1,7 @@
 package com.basketry.catalog.config;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.head;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -31,6 +32,14 @@ class CorsTests extends CatalogServiceTestBase {
     @Test
     void theConfiguredOriginMayBrowse() throws Exception {
         perform(get("/products").header("Origin", "http://localhost:5173"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Access-Control-Allow-Origin", "http://localhost:5173"));
+    }
+
+    /** Mutation: CORS methods without HEAD (a cross-origin HEAD on the public reads would be a 403). */
+    @Test
+    void theConfiguredOriginMayHead() throws Exception {
+        perform(head("/products").header("Origin", "http://localhost:5173"))
                 .andExpect(status().isOk())
                 .andExpect(header().string("Access-Control-Allow-Origin", "http://localhost:5173"));
     }

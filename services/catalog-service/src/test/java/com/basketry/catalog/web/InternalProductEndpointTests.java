@@ -84,4 +84,13 @@ class InternalProductEndpointTests extends CatalogServiceTestBase {
         perform(internal(get("/internal/products").param("ids", ids + ",101"))).andExpect(status().isBadRequest());
         perform(internal(get("/internal/products"))).andExpect(status().isBadRequest());
     }
+
+    /** The limit counts the list as sent, repeats included. Mutation: count the ids after removing repeats. */
+    @Test
+    void oneHundredAndOneRepeatsOfOneIdAre400() throws Exception {
+        long tea = givenProduct(MERCHANT, "Tea").id();
+        String ids = String.join(",", java.util.Collections.nCopies(101, Long.toString(tea)));
+
+        perform(internal(get("/internal/products").param("ids", ids))).andExpect(status().isBadRequest());
+    }
 }
