@@ -371,3 +371,36 @@ get their partitions; the script reports how long that took. It needs ports
 uses the same Compose project as the script above (so run one at a time), and
 exits with 6 if this README no longer has the exact Kafka commands it runs.
 Its logs go to `build\e2e\payment`.
+
+`scripts/e2e-inventory.ps1` does the same for inventory-service, with
+identity-service and merchant-service running too, because adding stock needs a
+merchant's token. Every command it runs is one of this README's, run as shown:
+the REST commands of "Trying inventory-service's REST API by hand" give product
+42 ten units, the Kafka commands of "Sending inventory-service a request by
+hand" produce the requests and read the results, and the `redis-cli` command of
+"Looking at the data" reads the counter. It sends the README's reserve and the
+same record again, a reserve over the limit, a reserve of a product with no
+stock row, a release before its reserve and then that reserve, a malformed
+reserve and a malformed release, and the release of the first order. It checks
+every result, the stock and the counter after each step, both dead-letter
+topics with their headers, that nothing was answered for the malformed records,
+and that no service log contains the internal API key or a database password of
+the run.
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\e2e-inventory.ps1
+powershell -ExecutionPolicy Bypass -File scripts\e2e-inventory.ps1 -Postgres
+```
+
+`-Postgres` runs inventory-service on Postgres (identity-service and
+merchant-service stay on H2: they are never restarted), sets the counter of
+product 42 to a wrong value and restarts inventory-service halfway: startup
+reconciliation must load the counter from Postgres again, and a replayed reserve
+and release must take and give back nothing. As above, the restarted listeners
+wait up to 45 s for their partitions. It needs ports 8080, 8082, 8083, 9092 and
+6379 free (`BASKETRY_REDIS_PORT` instead of 6379 if set; with `-Postgres` also
+5432, or `BASKETRY_POSTGRES_PORT`), uses its own Compose project
+(`basketry-e2e-inventory`; the ports are the same, so still run one script at a
+time), and exits with 6 if this README no longer has the exact commands it runs.
+A run takes about 4 minutes, 5 with `-Postgres`. Its logs go to
+`build\e2e\inventory`.

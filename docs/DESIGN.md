@@ -1587,7 +1587,12 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   of both services on Postgres). `scripts/e2e-payment.ps1` does the same for
   payment-service's requests, results and dead-letter topics, using the Kafka
   commands of services/README.md, so they are tested too (`-Postgres` adds a
-  restart and a repeated charge).
+  restart and a repeated charge). `scripts/e2e-inventory.ps1` does the same for
+  inventory-service's reserves, releases and dead-letter topics, with
+  identity-service and merchant-service running to add stock, and runs the
+  README's REST, Kafka and `redis-cli` commands as written (`-Postgres` adds a
+  restart after a wrong counter: reconciliation must reload it, and a replayed
+  reserve and release must take and give back nothing).
 - On Postgres, merchant-service's row-lock reads wait at most 5 s for another
   transaction's lock, then answer 503 `MERCHANT_BUSY` (Postgres would otherwise
   wait forever).
