@@ -25,8 +25,8 @@ class StockAvailabilityTests extends CatalogServiceTestBase {
         return new StockAvailability(inventoryClient, inventoryProperties, time);
     }
 
-    private static CachedProduct product(long id, boolean stockConflict) {
-        return new CachedProduct(id, MERCHANT, "P" + id, "", "Groceries", "1.00", stockConflict);
+    private static CachedProduct product(long id, boolean stockRowFailed) {
+        return new CachedProduct(id, MERCHANT, "P" + id, "", "Groceries", "1.00", stockRowFailed);
     }
 
     /** Mutation: a product with no stock row counted as IN_STOCK or UNKNOWN. */
@@ -47,7 +47,7 @@ class StockAvailabilityTests extends CatalogServiceTestBase {
 
     /**
      * The stock row belongs to another merchant: its stock is not this
-     * product's. Mutation: ignore stockConflict (another merchant's stock would
+     * product's. Mutation: ignore stockRowFailed (another merchant's stock would
      * make this product look buyable).
      */
     @Test

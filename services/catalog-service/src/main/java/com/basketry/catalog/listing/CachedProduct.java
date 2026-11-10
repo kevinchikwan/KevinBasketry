@@ -5,8 +5,9 @@ package com.basketry.catalog.listing;
  * availability, which is read from inventory-service on every listing and never
  * cached. The price is a string, so its scale survives the round trip exactly.
  *
- * @param stockConflict the product's stock row belongs to another merchant: always out of stock
+ * @param stockRowFailed the stock row could not be created for this product (CONFLICT: inventory-service has
+ *                       a row of another merchant; REJECTED: it refused the request): always out of stock
  */
 public record CachedProduct(long id, long merchantId, String name, String description, String category,
-                            String price, boolean stockConflict) {
+                            String price, boolean stockRowFailed) {
 }

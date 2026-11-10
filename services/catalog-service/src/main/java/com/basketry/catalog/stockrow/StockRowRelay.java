@@ -23,7 +23,9 @@ import org.springframework.stereotype.Service;
  *   <li>CONFLICT (409): CONFLICT, final, an ERROR, and the merchant's listings
  *       are invalidated so the product shows as out of stock at once. The pass
  *       goes on: the next request is unrelated.</li>
- *   <li>REJECTED (another 4xx): REJECTED, final, an ERROR. The pass goes on.</li>
+ *   <li>REJECTED (another 4xx): REJECTED, final, an ERROR, and the merchant's
+ *       listings are invalidated: the listing treats it as CONFLICT. The pass
+ *       goes on.</li>
  *   <li>RETRY (401, 5xx, timeout, no connection): the request stays PENDING
  *       and the pass stops, because the next request would fail the same way.
  *       The scheduler backs off.</li>
@@ -75,8 +77,10 @@ public class StockRowRelay {
                 case REJECTED -> {
                     log.error("inventory-service rejected the stock row of product {}: {}",
                             request.getProductId(), answer.detail());
-                    requests.complete(request.getProductId(), StockRowStatus.REJECTED, truncated(answer.detail()),
-                            clock.instant());
+                    if (requests.complete(request.getProductId(), StockRowStatus.REJECTED,
+                            truncated(answer.detail()), clock.instant()) == 1) {
+                        invalidator.merchantChanged(request.getMerchantId());
+                    }
                 }
                 case RETRY -> {
                     log.warn("Could not create the stock row of product {}: {}", request.getProductId(),

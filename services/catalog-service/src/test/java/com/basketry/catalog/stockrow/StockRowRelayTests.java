@@ -89,6 +89,26 @@ class StockRowRelayTests extends CatalogServiceTestBase {
     }
 
     /**
+     * The Stage 1 review's decision: the listing treats REJECTED like CONFLICT,
+     * always OUT_OF_STOCK even if inventory-service holds stock for the id, and
+     * at once, because the merchant's listings are invalidated. Mutations: count
+     * only CONFLICT as failed in the listing query; skip the invalidation on
+     * REJECTED (the cached page would still say IN_STOCK).
+     */
+    @Test
+    void aRejectedProductIsAlwaysOutOfStockAndShowsAtOnce() {
+        long tea = givenProduct(MERCHANT, "Tea").id();
+        inventory.givenStock(tea, MERCHANT, 50);
+        assertThat(publicListing().content().getFirst().availability()).as("before").isEqualTo(Availability.IN_STOCK);
+        inventory.answerCreatesWith(400);
+
+        relay.createPending();
+
+        assertThat(publicListing().content().getFirst().availability()).as("after").isEqualTo(Availability.OUT_OF_STOCK);
+        assertThat(listing.product(tea).orElseThrow().availability()).isEqualTo(Availability.OUT_OF_STOCK);
+    }
+
+    /**
      * 503: the request stays PENDING with the attempt recorded, the pass stops
      * (the next product is not called), and the next pass completes both.
      * Mutation: mark a retryable failure final (the product would never get a

@@ -44,10 +44,10 @@ abstract class ProductListCacheContractTests {
 
     @Test
     void aStoredPageIsReadBackAndAMissingOneIsNull() {
-        cache().put("catalog:v1:list:all:0:c*:p=0:s=20", "{\"page\":1}", Duration.ofSeconds(60));
+        cache().put("catalog:v2:list:all:0:c*:p=0:s=20", "{\"page\":1}", Duration.ofSeconds(60));
 
-        assertThat(cache().get("catalog:v1:list:all:0:c*:p=0:s=20")).isEqualTo("{\"page\":1}");
-        assertThat(cache().get("catalog:v1:list:all:0:c*:p=1:s=20")).isNull();
+        assertThat(cache().get("catalog:v2:list:all:0:c*:p=0:s=20")).isEqualTo("{\"page\":1}");
+        assertThat(cache().get("catalog:v2:list:all:0:c*:p=1:s=20")).isNull();
     }
 
     @Test

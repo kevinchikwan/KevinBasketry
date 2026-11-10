@@ -22,6 +22,20 @@ spring:
   flyway:
     locations: classpath:db/migration
 
+  # Errors are returned as RFC 9457 problem details, never as stack traces.
+  mvc:
+    problemdetails:
+      enabled: true
+
+  # As in identity-service: a number like 1.5 sent for a whole-number field is a
+  # 400, never truncated, and a field takes only its own JSON type: "5" for a
+  # number, 0 for a boolean or 5 for a string is a 400, never converted.
+  jackson:
+    deserialization:
+      accept-float-as-int: false
+    mapper:
+      allow-coercion-of-scalars: false
+
   # The listing cache (DESIGN.md Section 2). Redis is never the source of truth,
   # so it is never needed: when it is down or slow, listings are read from the
   # database. Short timeouts keep a slow Redis from holding up a listing;
@@ -42,13 +56,37 @@ spring:
       pool:
         size: 1
 
+# The health endpoint only, with no details. Neither Redis nor inventory-service
+# is part of it: catalog-service serves without either (DESIGN.md Section 2).
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+  health:
+    redis:
+      enabled: false
+
 basketry:
+  identity:
+    # identity-service's JWKS, for verifying bearer tokens (DESIGN.md Section 2, Tokens).
+    base-url: ${BASKETRY_IDENTITY_URL:http://localhost:8080}
+    connect-timeout: 2s
+    read-timeout: 5s
+  cors:
+    # Vite's default dev-server port. Widen this (comma-separated) once the Buyer
+    # and Merchant apps exist (DESIGN.md Section 1).
+    allowed-origins: http://localhost:5173
   internal:
     # Shared key: catalog-service sends it to inventory-service's /internal/stock
-    # (and, from Stage 2, requires it on its own /internal/**). Never committed:
+    # and requires it on its own /internal/** (order-service). Never committed:
     # comes from the environment (a Kubernetes Secret when deployed), the same
-    # variable the other services read. Unset = a WARN at startup, and
-    # inventory-service answers every call 401; set = at least 32 characters.
+    # variable the other services read. Unset = a WARN at startup, every call to
+    # /internal/** is refused, and inventory-service answers every call 401; set =
+    # at least 32 characters.
     api-key: ${BASKETRY_INTERNAL_API_KEY:}
   inventory:
     # inventory-service's /internal/stock: stock-row creation and stock reads.

@@ -27,12 +27,18 @@ import java.util.OptionalLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.transaction.PlatformTransactionManager;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -40,7 +46,8 @@ import tools.jackson.databind.json.JsonMapper;
  * Every Spring test of catalog-service: the real application on the test
  * database (H2, or PostgreSQL in postgresTest), the test cache (the in-memory
  * fake, or a real Redis in postgresTest) and a fake inventory-service over real
- * HTTP, all emptied before each test.
+ * HTTP, all emptied before each test. Tokens are verified against a fake
+ * identity-service publishing {@link TestTokens#KEY}.
  *
  * <p>The application's guards remember failures (they skip Redis or
  * inventory-service for a while), so a test that makes Redis fail builds its
@@ -49,6 +56,7 @@ import tools.jackson.databind.json.JsonMapper;
  * beans never see a failure.
  */
 @SpringBootTest
+@AutoConfigureMockMvc
 @Import(TestCacheConfig.class)
 public abstract class CatalogServiceTestBase {
 
@@ -61,7 +69,11 @@ public abstract class CatalogServiceTestBase {
     @DynamicPropertySource
     static void inventoryServer(DynamicPropertyRegistry registry) {
         registry.add("basketry.inventory.base-url", () -> FakeInventoryServer.shared().baseUrl());
+        registry.add("basketry.identity.base-url", () -> FakeIdentityServer.shared().baseUrl());
     }
+
+    @Autowired
+    protected MockMvc mvc;
 
     protected final FakeInventoryServer inventory = FakeInventoryServer.shared();
 
@@ -197,5 +209,33 @@ public abstract class CatalogServiceTestBase {
         public ProductListPage publicListing() {
             return listing.page(OptionalLong.empty(), Optional.empty(), 0, 20);
         }
+    }
+
+    /** A request with a bearer token. */
+    protected static MockHttpServletRequestBuilder bearer(MockHttpServletRequestBuilder request, String token) {
+        return request.header(HttpHeaders.AUTHORIZATION, "Bearer " + token);
+    }
+
+    /** A request with the internal API key. */
+    protected static MockHttpServletRequestBuilder internal(MockHttpServletRequestBuilder request) {
+        return request.header("X-Internal-Api-Key", API_KEY);
+    }
+
+    /** A JSON request body. */
+    protected static MockHttpServletRequestBuilder json(MockHttpServletRequestBuilder request, String body) {
+        return request.contentType(MediaType.APPLICATION_JSON).content(body);
+    }
+
+    protected ResultActions perform(MockHttpServletRequestBuilder request) throws Exception {
+        return mvc.perform(request);
+    }
+
+    /** A token of the owner of MERCHANT's products. */
+    protected static String ownerToken() {
+        return TestTokens.merchant(10, MERCHANT);
+    }
+
+    protected static String otherMerchantToken() {
+        return TestTokens.merchant(11, OTHER_MERCHANT);
     }
 }

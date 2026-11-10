@@ -32,7 +32,7 @@ public class ProductQueries {
     private static final RowMapper<CachedProduct> CACHED_PRODUCT = (rs, row) -> new CachedProduct(
             rs.getLong("id"), rs.getLong("merchant_id"), rs.getString("name"), rs.getString("description"),
             rs.getString("category"), rs.getBigDecimal("price").toPlainString(),
-            "CONFLICT".equals(rs.getString("stock_status")));
+            stockRowFailed(rs.getString("stock_status")));
 
     private final NamedParameterJdbcTemplate jdbc;
 
@@ -61,5 +61,22 @@ public class ProductQueries {
                 parameters, CACHED_PRODUCT);
         Long total = jdbc.queryForObject("SELECT COUNT(*)" + where, parameters, Long.class);
         return new CachedPage(content, total == null ? 0 : total);
+    }
+
+    /** One product, if the listing would show it (GET /products/{id}); empty for a hidden or missing one. */
+    @Transactional(readOnly = true)
+    public Optional<CachedProduct> publicProduct(long id) {
+        return jdbc.query("SELECT p.id, p.merchant_id, p.name, p.description, p.category, p.price,"
+                        + " sr.status AS stock_status" + VISIBLE_FROM + " AND p.id = :id",
+                new MapSqlParameterSource("id", id), CACHED_PRODUCT).stream().findFirst();
+    }
+
+    /**
+     * A final status with no usable stock row for this product: CONFLICT or
+     * REJECTED (DESIGN.md Section 2, catalog-service). Null-safe: the join can
+     * find no request.
+     */
+    private static boolean stockRowFailed(String status) {
+        return "CONFLICT".equals(status) || "REJECTED".equals(status);
     }
 }

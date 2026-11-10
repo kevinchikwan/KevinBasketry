@@ -63,22 +63,73 @@ and without inventory-service (listings show availability `UNKNOWN`, and new
 products wait for their stock row, which the relay creates once inventory-service
 is back). Without their database the services do not start.
 
-## catalog-service so far
+## Trying catalog-service's REST API by hand
 
-Stage 1 of catalog-service is the core: products, the local merchant status,
-the listing cache in Redis and the stock-row relay. It has no REST API yet, so
-there is nothing to call by hand; the commands to create and list products come
-with the API. It starts like the others (`.\gradlew.bat :catalog-service:bootRun`,
-port 8081) and reaches inventory-service at `BASKETRY_INVENTORY_URL` (default
-`http://localhost:8083`).
+Start identity-service, merchant-service, inventory-service and catalog-service
+(H2 is fine; Redis optional, Kafka not needed), each from a PowerShell window in
+which the same internal key is set first (any value of at least 32 characters):
 
-Set `BASKETRY_INTERNAL_API_KEY` to the same value as inventory-service's.
-Without it, catalog-service starts with a WARN, but inventory-service answers
-every call 401: the stock-row relay keeps retrying (with an ERROR in the log and
-backing off up to 60 s), so new products stay out of stock, and listings show
-availability `UNKNOWN`. Once the key is set and catalog-service restarted, the
-relay creates every waiting stock row.
+```
+$env:BASKETRY_INTERNAL_API_KEY = 'local-dev-only-internal-key-00000000'
+.\gradlew.bat :catalog-service:bootRun    # and :identity-service:bootRun, :merchant-service:bootRun, :inventory-service:bootRun
+```
 
+catalog-service (port 8081) reaches identity-service's JWKS at
+`BASKETRY_IDENTITY_URL` (default `http://localhost:8080`) and inventory-service
+at `BASKETRY_INVENTORY_URL` (default `http://localhost:8083`). Then, from another
+PowerShell window with the same variable set, onboard a merchant and log in as
+it (the admin is the placeholder identity-service seeds):
+
+```
+$admin = (Invoke-RestMethod -Method Post http://localhost:8080/auth/login -ContentType 'application/json' -Body '{"email":"admin-placeholder@basketry.example","password":"ChangeMe-Before-Deploy!"}').accessToken
+$shopId = (Invoke-RestMethod -Method Post http://localhost:8082/merchants -Headers @{ Authorization = "Bearer $admin" } -ContentType 'application/json' -Body '{"name":"Tea House","category":"Groceries","kycVerified":true,"commissionRate":5.00,"loginEmail":"tea@example.com","initialPassword":"Tea-Pass1"}').id
+$shop = (Invoke-RestMethod -Method Post http://localhost:8080/auth/login -ContentType 'application/json' -Body '{"email":"tea@example.com","password":"Tea-Pass1"}').accessToken
+```
+
+Create a product, see it in the public listing, give it stock and see it again:
+
+```
+$productId = (Invoke-RestMethod -Method Post http://localhost:8081/products -Headers @{ Authorization = "Bearer $shop" } -ContentType 'application/json' -Body '{"name":"Green Tea","description":"Loose leaf, 100 g","category":"Drinks","price":4.50}').id
+Invoke-RestMethod http://localhost:8081/products | ConvertTo-Json -Depth 5
+Invoke-RestMethod "http://localhost:8081/manage/products/$productId" -Headers @{ Authorization = "Bearer $shop" }
+Invoke-RestMethod -Method Post "http://localhost:8083/stock/$productId/adjustments" -Headers @{ Authorization = "Bearer $shop" } -ContentType 'application/json' -Body '{"delta":10}'
+Invoke-RestMethod "http://localhost:8081/products/$productId"
+```
+
+The new product is listed at once with `availability: OUT_OF_STOCK`. Within a
+second the relay creates its stock row in inventory-service, so the management
+read shows `stockRow: CREATED` (`PENDING` before), and the adjustment (on
+inventory-service, the owner of stock) then makes the detail `IN_STOCK`. If the
+adjustment answers 403, the stock row is not there yet: wait a second and repeat
+it. Change the price, deactivate, and read what the buyer and order-service see:
+
+```
+Invoke-RestMethod -Method Patch "http://localhost:8081/products/$productId" -Headers @{ Authorization = "Bearer $shop" } -ContentType 'application/json' -Body '{"price":4.95}'
+Invoke-RestMethod -Method Patch "http://localhost:8081/products/$productId" -Headers @{ Authorization = "Bearer $shop" } -ContentType 'application/json' -Body '{"active":false}'
+Invoke-RestMethod http://localhost:8081/manage/products -Headers @{ Authorization = "Bearer $shop" } | ConvertTo-Json -Depth 5
+Invoke-RestMethod "http://localhost:8081/internal/products?ids=$productId" -Headers @{ 'X-Internal-Api-Key' = $env:BASKETRY_INTERNAL_API_KEY } | ConvertTo-Json -Depth 5
+try { Invoke-RestMethod "http://localhost:8081/products/$productId" } catch { (New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())).ReadToEnd() }
+```
+
+The listing shows the new price at once (the cache is invalidated on every
+change). The deactivated product stays in the merchant's own list
+(`active: false`) and in the internal answer, while the public detail answers
+404. `{"active":true}` brings it back. Admin reads every product
+(`GET /manage/products`, optionally `?merchantId=`) and changes none. A refusal
+makes `Invoke-RestMethod` throw; the `try` line above shows how to read the
+problem detail in Windows PowerShell 5.1. DESIGN.md Section 3 lists every
+endpoint and rule.
+
+Set `BASKETRY_INTERNAL_API_KEY` in every window, to the same value. Without it,
+catalog-service starts with a WARN and refuses every `/internal/**` call, and
+inventory-service answers its calls 401: the stock-row relay keeps retrying
+(with an ERROR in the log, backing off up to 60 s), so new products stay
+`PENDING` and out of stock, and listings show availability `UNKNOWN`. Once the
+key is set and catalog-service restarted, the relay creates every waiting stock
+row.
+
+catalog-service does not use Kafka yet: its `merchant.status.changed` consumer
+comes next, and until then a deactivated merchant's products stay listed.
 ## Sending payment-service a request by hand
 
 order-service will own the two request topics and does not exist yet, and the

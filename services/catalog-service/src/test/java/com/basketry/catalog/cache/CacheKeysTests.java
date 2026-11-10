@@ -11,9 +11,9 @@ class CacheKeysTests {
 
     @Test
     void keysCarryTheFormatTheScopeAndItsVersion() {
-        assertThat(CacheKeys.versionKey(CacheKeys.ALL)).isEqualTo("catalog:v1:ver:all");
-        assertThat(CacheKeys.versionKey(CacheKeys.merchantScope(3))).isEqualTo("catalog:v1:ver:m:3");
-        assertThat(CacheKeys.pageKey("m:3", 7, Optional.empty(), 2, 20)).isEqualTo("catalog:v1:list:m:3:7:c*:p=2:s=20");
+        assertThat(CacheKeys.versionKey(CacheKeys.ALL)).isEqualTo("catalog:v2:ver:all");
+        assertThat(CacheKeys.versionKey(CacheKeys.merchantScope(3))).isEqualTo("catalog:v2:ver:m:3");
+        assertThat(CacheKeys.pageKey("m:3", 7, Optional.empty(), 2, 20)).isEqualTo("catalog:v2:list:m:3:7:c*:p=2:s=20");
         assertThat(CacheKeys.scopeOf(OptionalLong.of(3))).isEqualTo("m:3");
         assertThat(CacheKeys.scopeOf(OptionalLong.empty())).isEqualTo("all");
     }
@@ -28,6 +28,6 @@ class CacheKeysTests {
         assertThat(CacheKeys.pageKey("all", 0, Optional.of("c*"), 0, 20))
                 .isNotEqualTo(CacheKeys.pageKey("all", 0, Optional.empty(), 0, 20));
         assertThat(CacheKeys.pageKey("all", 0, Optional.of("Food & Drink: UK"), 0, 20))
-                .isEqualTo("catalog:v1:list:all:0:c=Food+%26+Drink%3A+UK:p=0:s=20");
+                .isEqualTo("catalog:v2:list:all:0:c=Food+%26+Drink%3A+UK:p=0:s=20");
     }
 }

@@ -21,4 +21,20 @@ public record CreateProductCommand(long merchantId, String name, String descript
         price = ProductFields.price(price, violations);
         ProductFields.throwIfAny(violations);
     }
+
+    /**
+     * The field rules alone, before the owner is known: the REST layer checks
+     * the body (400) before the caller's capability (403), as everywhere in
+     * the services (DESIGN.md Section 3).
+     *
+     * @throws InvalidProductException naming every broken rule
+     */
+    public static void checkFields(String name, String description, String category, BigDecimal price) {
+        List<String> violations = new ArrayList<>();
+        ProductFields.name(name, violations);
+        ProductFields.description(description, violations);
+        ProductFields.category(category, violations);
+        ProductFields.price(price, violations);
+        ProductFields.throwIfAny(violations);
+    }
 }

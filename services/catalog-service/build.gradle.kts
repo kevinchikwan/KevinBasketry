@@ -19,8 +19,13 @@ dependencies {
     implementation(platform(SpringBootPlugin.BOM_COORDINATES))
     testImplementation(platform(SpringBootPlugin.BOM_COORDINATES))
 
-    // The REST API comes in Stage 2; Stage 1 already needs RestClient for inventory-service.
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
+    implementation("org.springframework.boot:spring-boot-starter-validation")
+    implementation("org.springframework.boot:spring-boot-starter-security")
+    // Bearer-token authentication: verifies identity-service's RS256 tokens against its JWKS endpoint.
+    implementation("org.springframework.security:spring-security-oauth2-resource-server")
+    implementation("org.springframework.security:spring-security-oauth2-jose")
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     implementation("org.springframework.boot:spring-boot-starter-flyway")
     // The read-through cache of product listings, never the source of truth (DESIGN.md Section 2).
@@ -32,14 +37,15 @@ dependencies {
     runtimeOnly("org.flywaydb:flyway-database-postgresql")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
     // Only for postgresTest; the default test task never starts a container.
     testImplementation("org.testcontainers:testcontainers-postgresql")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
-// The default run: in-memory H2, an in-memory fake of the listing cache and a
-// fake inventory-service over real HTTP, no Docker. Tests tagged "postgres" or
-// "redis" run only in postgresTest.
+// The default run: in-memory H2, an in-memory fake of the listing cache, and a fake
+// inventory-service and identity-service JWKS over real HTTP, no Docker. Tests
+// tagged "postgres" or "redis" run only in postgresTest.
 tasks.test {
     useJUnitPlatform {
         excludeTags("postgres", "redis")

@@ -10,13 +10,14 @@ import java.util.OptionalLong;
  * belongs to one scope: {@code all}, or {@code m:<merchantId>} when it is
  * filtered by merchant. Every page key carries its scope's version, so bumping
  * the version makes every page of the scope unreachable at once; the old pages
- * expire by their TTL. The {@code v1} prefix is the format of the stored page:
+ * expire by their TTL. The {@code v2} prefix is the format of the stored page
+ * ({@code v1} until the conflict flag became {@code stockRowFailed}):
  * a change of {@link CachedPage} gets a new prefix, so a new release never
  * reads an old release's pages.
  */
 public final class CacheKeys {
 
-    static final String PREFIX = "catalog:v1:";
+    static final String PREFIX = "catalog:v2:";
     public static final String ALL = "all";
 
     private CacheKeys() {

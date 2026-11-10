@@ -12,6 +12,10 @@ public enum StockRowStatus {
      * reads as out of stock, because that row's stock is not this product's.
      */
     CONFLICT,
-    /** inventory-service refused the request as invalid (another 4xx): a bug. Final; logged as an error. */
+    /**
+     * inventory-service refused the request as invalid (another 4xx): a bug.
+     * Final; logged as an error. The product always reads as out of stock, as
+     * with CONFLICT.
+     */
     REJECTED
 }

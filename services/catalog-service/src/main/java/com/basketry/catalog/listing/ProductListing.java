@@ -65,6 +65,16 @@ public class ProductListing {
         return ProductListPage.of(content, page, size, cached.totalElements());
     }
 
+    /**
+     * GET /products/{id}: one product with its availability, if the listing
+     * would show it; empty (a 404) for a product that is inactive, of an
+     * inactive merchant, or missing. Not cached: one indexed read.
+     */
+    public Optional<ListedProduct> product(long id) {
+        return queries.publicProduct(id).map(product ->
+                ListedProduct.of(product, stock.of(List.of(product)).get(product.id())));
+    }
+
     private CachedPage cachedOrQueried(OptionalLong merchantId, Optional<String> category, int page, int size) {
         OptionalLong version = cache.version(CacheKeys.scopeOf(merchantId));
         if (version.isEmpty()) {

@@ -56,8 +56,9 @@ public class StockAvailability {
     }
 
     private static Availability availabilityOf(CachedProduct product, Map<Long, Long> stock) {
-        if (product.stockConflict()) {
-            // The stock in inventory-service is another merchant's product's, never this one's.
+        if (product.stockRowFailed()) {
+            // CONFLICT: the stock in inventory-service is another merchant's product's, never this one's.
+            // REJECTED: inventory-service refused the row; whatever it may hold for this id is not trusted.
             return Availability.OUT_OF_STOCK;
         }
         if (stock == null) {

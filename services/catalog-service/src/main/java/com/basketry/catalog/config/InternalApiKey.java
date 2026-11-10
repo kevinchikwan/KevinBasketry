@@ -11,8 +11,8 @@ import org.springframework.stereotype.Component;
 
 /**
  * The shared API key (DESIGN.md Section 3), used both ways: catalog-service
- * sends it to inventory-service's /internal/stock, and (from Stage 2) requires
- * it on its own /internal/**. The same rules as identity-service and
+ * sends it to inventory-service's /internal/stock, and requires it on its own
+ * /internal/**. The same rules as identity-service and
  * inventory-service: from {@code basketry.internal.api-key}
  * ({@code BASKETRY_INTERNAL_API_KEY}), whitespace stripped, shorter than
  * {@value #MIN_LENGTH} characters = startup fails.

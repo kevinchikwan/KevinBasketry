@@ -290,13 +290,15 @@ at checkout** (`GET /internal/products`, Section 3), not the listing.
 is cached: not a product's detail, not the management reads.
 - **Keys.** A listing belongs to a scope: `all`, or `m:{merchantId}` when it is
   filtered by merchant. Each scope has a version counter,
-  `catalog:v1:ver:{scope}`, with no TTL. A page is stored under
-  `catalog:v1:list:{scope}:{version}:{c=<category, URL-encoded>|c*}:p={page}:s={size}`
+  `catalog:v2:ver:{scope}`, with no TTL. A page is stored under
+  `catalog:v2:list:{scope}:{version}:{c=<category, URL-encoded>|c*}:p={page}:s={size}`
   with a TTL of 60 s. The category is URL-encoded so that free text can never
-  imitate another key. `v1` is the format of the stored page: changing it needs
-  a new prefix, so a new release never reads an old release's pages.
+  imitate another key. `v2` is the format of the stored page: changing it needs
+  a new prefix, so a new release never reads an old release's pages. (`v1` until
+  the page's conflict flag became `stockRowFailed`, covering `REJECTED` too.)
 - **Invalidation is a version bump, never a delete.** A product create or
-  update, an applied status event and a stock-row conflict (below) bump `all`
+  update, an applied status event and a stock-row `CONFLICT` or `REJECTED`
+  (below) bump `all`
   and the merchant's scope with `INCR`. Every page of those scopes is then
   unreachable at once; the old pages simply expire. A delete would need a
   `SCAN` over every page key, and would still have the race below.
@@ -329,13 +331,15 @@ is cached: not a product's detail, not the management reads.
   version keys and the counters have none, so it never evicts them. A test
   checks the TTLs on a real Redis.
 
-**Availability in listings** (FR-B6, FR-M6). After the page is read, from the
-cache or from Postgres, one call to inventory-service's
+**Availability in listings and on the detail** (FR-B6, FR-M6). After the page
+(or the one product of `GET /products/{id}`) is read, from the cache or from
+Postgres, one call to inventory-service's
 `GET /internal/stock?productIds=` (Section 3) gives the stock of its products;
 each product gets `availability`:
 - `IN_STOCK`: quantity above zero.
 - `OUT_OF_STOCK`: zero, no stock row (a new product whose row the relay has not
-  created yet), or a stock row in `CONFLICT` (below), whatever its quantity.
+  created yet), or a stock-row request in `CONFLICT` or `REJECTED` (below),
+  whatever inventory-service holds for that id.
 - `UNKNOWN`: inventory-service did not answer: no connection, a status other
   than 200, or no answer within 1 s (connect timeout 500 ms). Not "out of
   stock", because a whole site shown as sold out during an outage would be
@@ -360,7 +364,7 @@ transaction:
 |---|---|---|
 | 201 `CREATED`, 200 `ALREADY_EXISTS` | `CREATED` | next request |
 | 409 `PRODUCT_OWNED_BY_OTHER_MERCHANT` | `CONFLICT`, final, an ERROR | the merchant's listings are invalidated; next request |
-| any other 4xx except 401 | `REJECTED`, final, an ERROR (a bug) | next request |
+| any other 4xx except 401 | `REJECTED`, final, an ERROR (a bug) | the merchant's listings are invalidated; next request |
 | 401, 5xx, timeout, no connection | stays `PENDING`; `attempts` and `lastError` updated | the pass stops; waits 1, 2, 4 … up to 60 s, reset on success |
 
 - **Until the row exists**, the product reads as out of stock, and reserving it
@@ -374,6 +378,10 @@ transaction:
   visible at once, and order-service gets `stockRow: CONFLICT` and must refuse
   the line. Without this state, the listing would show, and a checkout would
   reserve, another merchant's stock under this product id.
+- **`REJECTED`** is treated exactly like `CONFLICT` wherever availability is
+  decided: always out of stock, with the same invalidation, and order-service
+  must refuse the line. Whatever inventory-service may hold for the id is not
+  trusted, because catalog-service never got a row created for it.
 - **A mark only moves a `PENDING` row**, so a final status never changes, and
   two instances that both handle a request (a rolling update) both get 201/200
   and mark once. Requests need no order between them; stopping the pass on a
@@ -999,20 +1007,89 @@ the JDK HttpClient.
 
 **catalog-service**
 
-*(The contracts below are the shape approved for Day 12; they are written out in
-full with the REST API, Stage 2.)*
-- `GET /products?merchantId=&category=&page=&size=` (public). Filters by
-  `merchantId`, not by merchant code: `merchant.status.changed` carries the code
-  only after a merchant's first status change, and no token or endpoint gives a
-  buyer the code of a merchant that never changed status. Only visible products
-  (Section 2, catalog-service: active, of an active merchant), each with
-  `availability`.
-- `GET /products/{id}` (public). 404 for a product the listing hides.
-- `POST /products` (Merchant, own products only)
-- `PATCH /products/{id}` (Merchant, own products only; `active: false`
-  deactivates)
-- `GET /internal/products?ids=` (internal key; for order-service's
-  re-validation at checkout, which is the real purchasability check)
+Three security chains:
+- **Public reads**, `GET /products` and `GET /products/{id}` only (matched by
+  method: POST and PATCH on the same paths are not public). No token is needed,
+  and **none is ever read**: an expired, broken or foreign token the Buyer app
+  still sends is ignored, so browsing never becomes a 401 (which would log the
+  buyer out), and the JWKS is never fetched, so identity-service being down
+  never makes browsing a 503.
+- **Everything else**: a bearer JWT, verified exactly as in merchant-service and
+  inventory-service (identity-service's JWKS at `BASKETRY_IDENTITY_URL`, fetched
+  on first use, cached, 2 s / 5 s timeouts, 503 when a token's key is not cached
+  and the JWKS cannot be fetched, 401 for a malformed, expired, tampered or
+  unpublished-key token or none). The capability is checked at the endpoint.
+  `GET /actuator/health` (and its probe groups) needs no token, shows no details
+  and includes neither Redis nor inventory-service.
+- **`/internal/**`**: identity-service's rules exactly (the shared key in
+  `X-Internal-Api-Key` only, never a JWT, no CORS, the same bare 401 for a
+  missing key, a wrong key or a user JWT; an unset key refuses every call).
+
+As everywhere: request validation runs before the capability check, so an
+invalid request is a 400 for anyone, never a 403. Every error is a problem
+detail. A field takes only its own JSON type: `"2.50"` for a price, `0` or
+`"false"` for a boolean, `5` for a string, and `1.5` for a whole number are
+400s, never converted. CORS allows `basketry.cors.allowed-origins` (GET, POST
+and PATCH, no credentials). Product fields and their rules: Section 2.
+
+- `GET /products` (public; FR-B3). Paging as `GET /accounts`: `page` from 0
+  (default 0), `size` 1..100 (default 20), anything out of range a 400, id
+  order, a page past the end 200 with empty `content`. Optional `merchantId`
+  (positive) and `category` (1 to 50 characters, exact and case-sensitive).
+  Filters by `merchantId`, not by merchant code: `merchant.status.changed`
+  carries the code only after a merchant's first status change, and no token or
+  endpoint gives a buyer the code of a merchant that never changed status. Only
+  visible products (Section 2: active, of an active merchant). Response
+  `{content, page, size, totalElements, totalPages}`; each item `id`,
+  `merchantId`, `name`, `description`, `category`, `price`, `availability`
+  (`IN_STOCK`, `OUT_OF_STOCK` or `UNKNOWN`, Section 2). Cached in Redis
+  (Section 2); availability never is.
+- `GET /products/{id}` (public). The listing's fields, with its own
+  availability. **404 for a product the listing hides** (inactive, or of an
+  inactive merchant), as for one that does not exist; the Buyer app shows a cart
+  line that gets a 404 as "no longer available". Not cached.
+- `POST /products` (FR-M2; a token with `MERCHANT`). Body `name`, `category`,
+  `price` required, `description` optional. The owner is the token's
+  `merchantId`, never a field: any other field (`merchantId`, `active` …) is a
+  400 naming it, and a new product is always active. **201** with
+  `Location: /manage/products/{id}` (the public URL hides the product while its
+  merchant is inactive) and the management fields below, `stockRow: PENDING`.
+  A buyer or an admin gets 403 (admin can read every product, change none).
+- `PATCH /products/{id}` (FR-M2, FR-M3; the owning merchant only). Accepts
+  `name`, `description`, `category`, `price` and `active`, at least one.
+  Omitted means unchanged; an explicit `null` is a 400 naming it, never "no
+  change" or `false`; `""` clears the description; any other field is a 400
+  naming it. `active: false` deactivates and `true` reactivates; there is no
+  DELETE. 200 with the product after the change; values that do not change are a
+  200 no-op. Another merchant's product and one that does not exist are both
+  403, decided after the body is checked. The update reads the product with a
+  row lock and waits at most 5 s for another request's lock; then **503
+  `PRODUCT_BUSY`**, nothing applied, and the client can retry.
+- `GET /manage/products` (the Merchant portal and Admin). Paging as
+  `GET /products`. A merchant sees only its own products, **inactive ones
+  included**, also while it is itself inactive; a `merchantId` other than its
+  own is a 403. Admin sees every product, or one merchant's with `merchantId=`
+  (positive, else 400). A buyer-only token gets 403. Each item: `id`,
+  `merchantId`, `name`, `description`, `category`, `price`, `active`,
+  `stockRow` (`PENDING`, `CREATED`, `CONFLICT` or `REJECTED`, Section 2),
+  `createdAt`, `updatedAt`. Never cached.
+- `GET /manage/products/{id}` (Admin, or the merchant that owns it). As
+  inventory-service's `GET /stock/{productId}`: a non-admin gets 403 both for
+  another merchant's product and for one that does not exist; only an admin gets
+  a 404.
+- `GET /internal/products?ids=1,2,3` (internal key; for order-service's
+  re-validation of every checkout line, **the real check of purchasability**).
+  1 to 100 positive ids, else 400. Response `{content: [...]}` in id order, a
+  repeated id answered once, unknown ids left out. Each item `id`, `merchantId`,
+  `name`, `price` (the current one), `active`, `merchantActive`, `stockRow`
+  (all four statuses). Hidden products are included, so order-service can tell
+  why a line is refused: a line is purchasable only if `active`,
+  `merchantActive`, and `stockRow` is neither `CONFLICT` nor `REJECTED` (a
+  `PENDING` one fails at reservation with `UNKNOWN_PRODUCT`). `merchantActive`
+  is catalog-service's local copy: true for a merchant that never changed
+  status, and it lags `merchant.status.changed` by seconds. No merchant code
+  and no commission rate (merchant-service's; Section 6). Provisional until
+  order-service is built.
 
 **inventory-service**
 
@@ -1658,7 +1735,8 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   for the JWKS, and `BASKETRY_INTERNAL_API_KEY` in its Secret for the calls
   catalog-service makes to `/internal/stock`; without the key it starts,
   but refuses every internal call. catalog-service needs the same Redis
-  settings, `BASKETRY_INVENTORY_URL` (ConfigMap) for `/internal/stock`, and
+  settings, `BASKETRY_IDENTITY_URL` (ConfigMap) for the JWKS,
+  `BASKETRY_INVENTORY_URL` (ConfigMap) for `/internal/stock`, and
   `BASKETRY_INTERNAL_API_KEY` in its Secret; without the key it starts with a
   WARN, but inventory-service refuses its stock-row creation and stock reads
   (401), so new products stay out of stock and listings show availability
