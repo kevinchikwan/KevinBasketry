@@ -250,7 +250,7 @@ StockLevel                      -- table stock_level
 
 StockReservation                -- table stock_reservation; one row per (order, product), kept for good
   orderId, productId            -- composite PK; the idempotency key of reserve and release
-  quantity: int                 -- as requested; taken only while RESERVED
+  quantity: int                 -- as requested, capped at 2^31-1; taken only while RESERVED
   status: RESERVED | RELEASED | FAILED
   reasonCode                    -- set exactly when FAILED: INSUFFICIENT_STOCK, UNKNOWN_PRODUCT,
                                 --   QUANTITY_OVER_LIMIT or RELEASED_BEFORE_RESERVE; the
@@ -334,6 +334,12 @@ new outbox row, because the first publish may have been lost:
   row, gives nothing back, and still publishes `released`.
 - A repeat with a different quantity keeps the first result and logs a WARN.
   A release always gives back the stored quantity, never the request's.
+- **A request's quantity can be any positive whole number** (Section 5), and
+  one above 2^31-1 is stored as 2^31-1. So the quantity of a `FAILED` row or a
+  tombstone means "the request asked for at least this much", and is **never
+  used in arithmetic**: a `FAILED` row took nothing, and a tombstone gives
+  nothing back. Only a `RESERVED` row's quantity (at most 1,000, exact) is ever
+  given back.
 - A release adds to Postgres in the same transaction as the status change,
   and adds to the counter after the commit.
 
@@ -1017,11 +1023,11 @@ overselling race window this design exists to close.
 | `order.merchant.declined` | payment-service | order-service | orderId, merchantId, reasonCode |
 | `order.merchant-refund.requested` | order-service | payment-service | orderId, merchantId, transactionRef |
 | `order.merchant.refunded` | payment-service | order-service | orderId, merchantId |
-| `order.stock-reserve.requested` | order-service | inventory-service | orderId, productId, quantity |
-| `order.stock.reserved` | inventory-service | order-service | orderId, productId |
-| `order.stock.reservation-failed` | inventory-service | order-service | orderId, productId, reasonCode |
-| `order.stock-release.requested` | order-service | inventory-service | orderId, productId, quantity |
-| `order.stock.released` | inventory-service | order-service | orderId, productId |
+| `order.stock-reserve.requested` | order-service | inventory-service | schemaVersion, orderId, productId, quantity |
+| `order.stock.reserved` | inventory-service | order-service | schemaVersion, eventId, orderId, productId, occurredAt |
+| `order.stock.reservation-failed` | inventory-service | order-service | schemaVersion, eventId, orderId, productId, reasonCode, occurredAt |
+| `order.stock-release.requested` | order-service | inventory-service | schemaVersion, orderId, productId, quantity |
+| `order.stock.released` | inventory-service | order-service | schemaVersion, eventId, orderId, productId, occurredAt |
 | `order.succeeded` | order-service | promotion-service, platform-service | orderId, items[], couponCode |
 | `order.failed` | order-service | *(none currently — reserved for future audit/notification use)* | orderId, reasonCode |
 
@@ -1285,6 +1291,97 @@ payment-service; the requests that cause them are below):
   `basketry.outbox.relay.enabled`, both off in tests, which call `PaymentService`
   and the relay directly unless a test class turns them on.
 
+**inventory-service results** (`order.stock.reserved`,
+`order.stock.reservation-failed`, `order.stock.released`; the rules for repeats
+are in Section 2, inventory-service). The same as payment-service's results:
+transactional outbox in inventory-service's own `outbox_event` table, key
+`orderId`, the same relay and producer settings, topics of 3 partitions created
+by the service on its first publish together with its two dead-letter topics,
+no transaction open during a send. Only the differences:
+- **Value:**
+  ```json
+  {"schemaVersion":1, "eventId":"<uuid>", "orderId":7, "productId":42,
+   "occurredAt":"2026-11-09T10:00:00Z"}
+  ```
+  `reservation-failed` adds `reasonCode` (`INSUFFICIENT_STOCK`,
+  `UNKNOWN_PRODUCT`, `QUANTITY_OVER_LIMIT` or `RELEASED_BEFORE_RESERVE`). No
+  result carries a quantity.
+- **Ids follow insert order, not commit order, and that is harmless here** for
+  payment's reason: every result one topic carries for one
+  `(orderId, productId)` has the same outcome. The stored row decides
+  `reserved` or `reservation-failed` (with its one code) for good, a `RELEASED`
+  row still answers `reserved`, and a release is always `released`. There is no
+  order across topics, so order-service can see a re-published `reserved` after
+  the `released` of the same line, and must treat it as payment's `charged`
+  after a refund: a no-op for an order in a final state, dropped by
+  `(orderId, productId)` for one still `PENDING`.
+- **Two timers, two threads.** The relay and the counter reconciliation
+  (Section 2) share the service's scheduler, which gets 2 threads
+  (`spring.task.scheduling.pool.size`): with Spring's default of 1, a long
+  reconciliation pass would hold up every result.
+
+**inventory-service requests** (`order.stock-reserve.requested`,
+`order.stock-release.requested`; order-service will produce them). The same as
+payment-service's requests: strict parsing on the JSON tree, `schemaVersion`
+checked first, unknown and repeated fields refused, the same settings (group id
+`inventory-service` for both listeners, one thread each, earliest, the container
+committing after each record), Kafka not needed to start, listeners that never
+run inside a transaction, and the same dead-letter rules and headers. Only the
+differences:
+- **Values.** Both topics have exactly these fields:
+  ```json
+  {"schemaVersion":1, "eventId":"<uuid>", "orderId":7, "productId":42,
+   "quantity":3, "occurredAt":"2026-11-09T10:00:00Z"}
+  ```
+  Required: `schemaVersion` (only `1`), `orderId` and `productId` (positive
+  whole JSON numbers that fit 64 bits), `quantity`. `eventId` and `occurredAt`
+  are optional strings, not used.
+- **`quantity` is a positive whole JSON number of any size**, read as a big
+  integer so it can never overflow. `0`, negative numbers, `1.0`, `1e3` and
+  `"3"` are malformed (dead-letter topic). A reserve above 1,000, however large,
+  is answered `QUANTITY_OVER_LIMIT`; a quantity above 2^31-1 is stored as
+  2^31-1 (Section 2). A release's quantity is only compared with the stored one
+  (a WARN when they differ), so a release is **never dead-lettered for its
+  quantity's size**: a release with no reply would leave the stock taken.
+- **Redis never fails a record.** Every Redis call goes through the counter
+  guard (Section 2), which turns any error into "unavailable"; the record is
+  decided by PostgreSQL alone. Redis is called only outside a database
+  transaction, and a test checks that for every Redis call a reserve or release
+  makes through the listener.
+- **`max.poll.records` is 50.** A reserve can make up to four Redis calls (take,
+  load, take again, subtract), each with a 500 ms timeout, so about 2 s a record
+  while Redis is slow but still answering. 500 records a poll (the default)
+  would exceed `max.poll.interval.ms` (5 minutes), and the group would rebalance
+  over and over.
+- **A request that cannot be handled:**
+
+  | Case | Action |
+  |---|---|
+  | No value, malformed JSON, a missing, unknown, repeated or wrongly typed field | Dead-letter topic, then the next record |
+  | Unknown `schemaVersion` | Dead-letter topic, then the next record |
+  | An id of 0 or less, or one that does not fit 64 bits | Dead-letter topic, then the next record |
+  | `quantity` 0 or less, or not a whole number | Dead-letter topic, then the next record |
+  | Any unexpected exception (for example a release finding no stock row for a `RESERVED` reservation, which only data loss can cause) | Dead-letter topic, then the next record |
+  | Database error (anywhere in the cause chain) | Retry with no limit, seeking back, waiting 1, 2, 4 … up to 60 s; the offset is not committed |
+  | Redis error | Never reaches the listener (above) |
+
+  Everything else is answered, also every rejection that is a business
+  outcome: a reserve over the limit, of an unknown product, without enough
+  stock, or after its release (`reservation-failed`), and a release with no
+  reservation (a tombstone, then `released`). So the dead-letter topics are the
+  only requests that get no reply, and **an order whose reserve or release was
+  dead-lettered stays `PENDING`** (Section 6).
+- **Dead-letter topics:** `order.stock-reserve.requested.DLT` and
+  `order.stock-release.requested.DLT`, 3 partitions, keyed like the original,
+  owned by inventory-service and created on first use. Replaying one by hand
+  after a fix is safe, because requests are idempotent (Section 2). Nothing in
+  these records is secret, but the exception headers follow payment-service's
+  rule anyway (our two only, never quoting a value), so a dead letter never
+  carries text from the request into a header or a log line.
+- **Switches:** `basketry.stock-requests.consumer.enabled` and
+  `basketry.outbox.relay.enabled`, both off in tests, which call `StockService`
+  and the relay directly unless a test class turns them on.
+
 The `order.*` events carry the `orderId` (and `merchantId`/`productId` where
 relevant) as a natural idempotency key — consumers must treat redelivery
 as a no-op if they've already processed that combination, since Kafka's
@@ -1301,7 +1398,11 @@ at-least-once delivery means duplicates are expected, not exceptional.
   payment-service sends to its dead-letter topic** (unknown reference, a
   `DECLINED` transaction, another order's or merchant's reference) **gets no
   reply, and the order stays `PENDING` until order-service has stuck-saga
-  handling**. Decide before writing order-service's saga coordinator.
+  handling**. The same holds for **a reserve or release that inventory-service
+  sends to its dead-letter topic** (a malformed record, Section 5): no reply,
+  and for a dead-lettered release, the stock it should give back stays taken
+  until the record is fixed and replayed by hand. Decide before writing
+  order-service's saga coordinator.
 - Whether `order-service` needs its own outbox table to guarantee
   `MerchantChargeRequested` is published exactly once per DB commit
   (transactional outbox pattern) — worth doing properly rather than
@@ -1393,8 +1494,8 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   every internal call, so merchant onboarding fails. `merchant-service`
   also needs `BASKETRY_IDENTITY_URL` (in a ConfigMap; not a secret) to reach
   identity-service for the JWKS and for merchant-link. identity-service,
-  merchant-service and payment-service need `BASKETRY_KAFKA_BOOTSTRAP_SERVERS`
-  (also a ConfigMap) to reach Kafka. inventory-service needs
+  merchant-service, payment-service and inventory-service need
+  `BASKETRY_KAFKA_BOOTSTRAP_SERVERS` (also a ConfigMap) to reach Kafka. inventory-service needs
   `BASKETRY_REDIS_HOST` and `BASKETRY_REDIS_PORT` (ConfigMap) and
   `BASKETRY_REDIS_PASSWORD` (Secret; Section 6) to reach Redis, which runs as
   its own pod with no persistent volume, `BASKETRY_IDENTITY_URL` (ConfigMap)
@@ -1443,7 +1544,8 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
 - **Kafka and Postgres keep their data in named volumes, and are kept or wiped
   together**, because each depends on the other: Postgres holds the merchant
   versions, the payment transactions and both outboxes, Kafka the events already
-  sent and the consumers' positions. Two rules:
+  sent and the consumers' positions. inventory-service's stock rows,
+  reservations and outbox are in Postgres too. Two rules:
   - `docker compose down` stops everything and keeps all data.
   - `docker compose down -v` wipes all data, Kafka's and Postgres's, also when
     the `postgres` profile is not given.
@@ -1463,14 +1565,18 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   payment-service loses every transaction and any `PENDING` result: a repeated
   charge request is then charged again under a new `transactionRef`, and a refund
   of an old reference goes to the dead-letter topic. Restarting only
-  inventory-service loses every stock row and reservation: a repeated reserve
-  is then decided again, and a release of an old reservation stores a tombstone
-  and gives nothing back. On Postgres each service can be restarted on its own.
+  inventory-service loses every stock row, every reservation and any `PENDING`
+  result: a repeated reserve is then decided again (`UNKNOWN_PRODUCT` until the
+  stock rows are created again), and a release of an old reservation stores a
+  tombstone and gives nothing back. On Postgres each service can be restarted
+  on its own.
 - **Interim:** REQUIREMENTS asks for the whole system to start with one
   documented command. For now Compose holds Kafka, Redis and Postgres, and the
   services run from IntelliJ. The rest joins as each piece is built.
 - The default build (`./gradlew build`) needs no Docker: it runs on H2, every
-  service's Kafka tests use an embedded KRaft broker, and inventory-service's
+  service's Kafka tests use an embedded KRaft broker (its data goes to the
+  system temp directory: the broker's test kit ignores `log.dir` and
+  `log.dirs`), and inventory-service's
   tests use an in-memory fake of the stock counter that passes the same contract
   tests as the Redis one. Two checks need Docker:
   `./gradlew postgresTest` runs every test again on a real Postgres in a

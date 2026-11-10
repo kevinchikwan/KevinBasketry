@@ -10,7 +10,8 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 /**
  * Maps the service's exceptions, which carry no HTTP types (the Kafka listener
- * of the next stage throws the same ones), to problem details:
+ * meets the same ones and sends their records to a dead-letter topic), to
+ * problem details:
  * an invalid command is 400, an unknown product 404 (only an admin can reach
  * it; everyone else gets 403 first), and every other refusal 409 with its
  * {@code code}.

@@ -45,12 +45,14 @@ It keeps nothing: no snapshots, no append-only file, no volume. Every start is
 empty, and inventory-service reloads the counters from its database at startup,
 every 5 minutes, and whenever one is missing.
 
-All three services also run without Kafka. merchant-service:
+All four services also run without Kafka. merchant-service:
 `PATCH` still works and the events wait in its outbox until the broker is back.
 identity-service: login and every other request still work, and the status
 consumer catches up once the broker is back. payment-service: the request
 listeners connect once the broker is back, and results wait in its outbox
-meanwhile. inventory-service also runs without Redis: reservations are then
+meanwhile. inventory-service: the REST API still works, the request listeners
+connect once the broker is back, and results wait in its outbox meanwhile. It
+also runs without Redis: reservations are then
 decided by its database alone, still correctly, and it logs one WARN per outage.
 Without their database the services do not start.
 
@@ -135,6 +137,42 @@ any. Without the key, or with a user token instead of it, `/internal/**`
 answers a bare 401. inventory-service finds identity-service's JWKS at
 `BASKETRY_IDENTITY_URL` (default `http://localhost:8080`), as merchant-service
 does. DESIGN.md Section 3 lists every endpoint and rule.
+
+## Sending inventory-service a request by hand
+
+As for payment-service, order-service will own the two request topics, so
+create them once; inventory-service creates its own result and dead-letter
+topics. Start inventory-service with Kafka (Redis optional) and give a product
+some stock first ("Trying inventory-service's REST API by hand" above). From the
+repo root:
+
+```
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 --create --if-not-exists --topic order.stock-reserve.requested --partitions 3 --replication-factor 1
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 --create --if-not-exists --topic order.stock-release.requested --partitions 3 --replication-factor 1
+```
+
+Produce a reserve request, keyed by its orderId. Type the line after the
+producer starts, then Ctrl+C:
+
+```
+docker compose exec kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:29092 --topic order.stock-reserve.requested --property parse.key=true --property key.separator="|"
+7|{"schemaVersion":1,"orderId":7,"productId":42,"quantity":3}
+```
+
+A release request goes to `order.stock-release.requested` the same way, with
+the same fields. Read the results, and the dead-letter topic with its headers:
+
+```
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:29092 --topic order.stock.reserved --from-beginning --property print.key=true --timeout-ms 10000
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:29092 --topic order.stock-reserve.requested.DLT --from-beginning --property print.key=true --property print.headers=true --timeout-ms 10000
+```
+
+The other result topics are `order.stock.reservation-failed` and
+`order.stock.released`, and the other dead-letter topic is
+`order.stock-release.requested.DLT`. Each consumer stops after 10 s without a
+new record. A quantity above 1,000 is answered `QUANTITY_OVER_LIMIT`; a quantity
+of 0 or less, a non-whole number, an unknown field or another `schemaVersion`
+goes to the dead-letter topic (DESIGN.md Section 5).
 
 ## Running a service on Postgres
 
@@ -258,8 +296,10 @@ back.
   its merchants as `LINKED`, and they cannot be linked again. Restarting only
   payment-service loses every transaction: a repeated charge request is charged
   again under a new reference, and refunds of old references go to the
-  dead-letter topic. Restarting only inventory-service loses every stock row and
-  reservation.
+  dead-letter topic. Restarting only inventory-service loses every stock row,
+  reservation and unpublished result: a repeated reserve is decided again
+  (`UNKNOWN_PRODUCT` until the stock rows are created again), and a release of
+  an old reservation stores a tombstone and gives nothing back.
 
 ## Tests
 
@@ -271,7 +311,8 @@ back.
 payment-service's card-number leak tests on their own (both are also part of
 the two runs above):
 
-```n.\gradlew.bat :payment-service:test --tests "*CardNumberLeakTests"
+```
+.\gradlew.bat :payment-service:test --tests "*CardNumberLeakTests"
 ```
 
 `postgresTest` (also per service, e.g. `:merchant-service:postgresTest`) starts

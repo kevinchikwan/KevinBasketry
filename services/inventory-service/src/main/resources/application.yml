@@ -50,6 +50,57 @@ spring:
       connect-timeout: 500ms
       timeout: 500ms
 
+  # The two request topics in, the three result topics out (DESIGN.md Section 5).
+  # Startup never waits for Kafka: the listeners connect in the background and
+  # keep trying, and the relay creates the topics on its first publish.
+  kafka:
+    bootstrap-servers: ${BASKETRY_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: inventory-service
+      # Requests published before this service first started are still read.
+      auto-offset-reset: earliest
+      # The container commits after each record is handled, never before.
+      enable-auto-commit: false
+      # A reserve can make up to four Redis calls of up to 500 ms each when Redis
+      # is slow but still answering: about 2 s a record. 50 records stay well
+      # inside max.poll.interval.ms (5 minutes); the default of 500 would not,
+      # and the group would rebalance over and over.
+      max-poll-records: 50
+      properties:
+        # order-service owns the request topics. Until it creates them they are
+        # missing, which is normal; this is how soon the consumer notices them
+        # (the client's default is 5 minutes).
+        allow.auto.create.topics: false
+        metadata.max.age.ms: 10000
+        # Keeps the log readable while the broker is down.
+        reconnect.backoff.max.ms: 10000
+    listener:
+      ack-mode: record
+      concurrency: 1
+      missing-topics-fatal: false
+    # The relay and the dead-letter topics. A send either finishes or fails within these limits.
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+    admin:
+      # Startup never touches Kafka: our topics are created on first use.
+      auto-create: false
+      operation-timeout: 3s
+      properties:
+        request.timeout.ms: 3000
+        default.api.timeout.ms: 3000
+
+  # Two timers, the counter reconciliation and the outbox relay: one thread
+  # each, so a long reconciliation pass never holds up the relay.
+  task:
+    scheduling:
+      pool:
+        size: 2
+
 # The health endpoint only, with no details. Redis is not part of health at all,
 # so an unreachable Redis never makes the pod unready (DESIGN.md Section 2).
 management:
@@ -90,3 +141,30 @@ basketry:
       enabled: true
       interval: 5m
       page-size: 500
+  # The result topics and the relay that publishes the outbox rows.
+  outbox:
+    # Fixed: changing the count later moves keys between partitions and breaks per-order order.
+    partitions: 3
+    replication-factor: 1
+    # Longer than max.block.ms plus delivery.timeout.ms, so the producer gives the answer first.
+    send-timeout: 16s
+    relay:
+      enabled: true
+      interval: 1s
+      batch-size: 100
+      # After a failed pass: wait 1s, 2s, 4s ... up to 60s. A success resets it.
+      backoff-initial: 1s
+      backoff-max: 60s
+  # The reserve and release request listeners.
+  stock-requests:
+    consumer:
+      enabled: true
+    # Owned and created by order-service, never here.
+    reserve-topic: order.stock-reserve.requested
+    release-topic: order.stock-release.requested
+    # Each request topic's dead-letter topic is its name plus ".DLT", created here on first use.
+    dead-letter-partitions: 3
+    replication-factor: 1
+    # After a database failure: wait 1s, 2s, 4s ... up to 60s, with no limit on attempts.
+    retry-initial: 1s
+    retry-max: 60s
