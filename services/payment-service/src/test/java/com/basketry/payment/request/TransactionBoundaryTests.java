@@ -14,6 +14,7 @@ import com.basketry.payment.payment.PaymentService;
 import com.basketry.payment.support.PaymentServiceTestBase;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -52,9 +53,16 @@ class TransactionBoundaryTests extends PaymentServiceTestBase {
     /** Whether a transaction was open at each call. */
     private final List<Boolean> seen = new CopyOnWriteArrayList<>();
 
+    /** Calls that have returned: a test waits for these, not for {@link #seen}, before it ends. */
+    private final AtomicInteger finished = new AtomicInteger();
+
     private Object record(org.mockito.invocation.InvocationOnMock call) throws Throwable {
         seen.add(TransactionSynchronizationManager.isActualTransactionActive());
-        return call.callRealMethod();
+        try {
+            return call.callRealMethod();
+        } finally {
+            finished.incrementAndGet();
+        }
     }
 
     @Test
@@ -63,14 +71,19 @@ class TransactionBoundaryTests extends PaymentServiceTestBase {
         doAnswer(this::record).when(spiedPayments).refund(any());
         Charged charged = (Charged) payments.authorize(charge(51, 3, "25.50", APPROVED_CARD));
         seen.clear();
+        finished.set(0);   // the direct call above has returned; only the listener's calls count
 
         kafka.send(PaymentRequestKafkaTests.CHARGE_TOPIC, "52",
                 PaymentRequestKafkaTests.chargeRequest(52, 3, "25.50", APPROVED_CARD)).get();
         kafka.send(PaymentRequestKafkaTests.REFUND_TOPIC, "51",
                 PaymentRequestKafkaTests.refundRequest(51, 3, charged.transactionRef())).get();
 
-        await().atMost(PATIENCE).until(() -> seen.size() == 2);
+        // seen counts calls as they start. Waiting for both to return (outbox rows included)
+        // means nothing of this test is still writing when the next test has emptied the
+        // tables; otherwise the refund's row could reach the relay test as a third publish.
+        await().atMost(PATIENCE).until(() -> finished.get() == 2);
         assertThat(seen).containsExactly(false, false);
+        assertThat(outboxRows()).hasSize(3);
     }
 
     @Test
