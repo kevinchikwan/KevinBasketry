@@ -30,6 +30,8 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-flyway")
     // The read-through cache of product listings, never the source of truth (DESIGN.md Section 2).
     implementation("org.springframework.boot:spring-boot-starter-data-redis")
+    // The merchant.status.changed consumer and its dead-letter topic (DESIGN.md Section 5).
+    implementation("org.springframework.boot:spring-boot-starter-kafka")
     // In-memory H2 by default; PostgreSQL with the "postgres" profile (DESIGN.md Section 7).
     runtimeOnly("com.h2database:h2")
     runtimeOnly("org.postgresql:postgresql")
@@ -38,6 +40,8 @@ dependencies {
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
+    // An embedded KRaft broker in the JVM: the Kafka tests need no Docker.
+    testImplementation("org.springframework.boot:spring-boot-starter-kafka-test")
     // Only for postgresTest; the default test task never starts a container.
     testImplementation("org.testcontainers:testcontainers-postgresql")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

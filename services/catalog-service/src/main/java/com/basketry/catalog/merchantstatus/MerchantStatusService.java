@@ -9,8 +9,8 @@ import org.springframework.stereotype.Service;
 /**
  * Applies a merchant's status to the local copy and, if it changed anything,
  * invalidates the listings that can show the merchant's products. The
- * merchant.status.changed listener (Day 13) parses each record and calls this;
- * until then tests call it directly.
+ * merchant.status.changed listener parses each record and calls this, outside
+ * any transaction; tests call it directly unless they turn the listener on.
  *
  * <p>Not transactional: the MERGE commits on its own, and the invalidation
  * must come after the commit ({@link ListingInvalidator}). A crash in between

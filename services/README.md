@@ -48,7 +48,7 @@ missing, and catalog-service fills its cache again as listings are read. It runs
 with 64 MB and `volatile-lru`: when full, it evicts cached listing pages (they
 have a TTL) and never a stock counter (no TTL; DESIGN.md Section 7).
 
-All four services also run without Kafka. merchant-service:
+All five services also run without Kafka. merchant-service:
 `PATCH` still works and the events wait in its outbox until the broker is back.
 identity-service: login and every other request still work, and the status
 consumer catches up once the broker is back. payment-service: the request
@@ -57,8 +57,9 @@ meanwhile. inventory-service: the REST API still works, the request listeners
 connect once the broker is back, and results wait in its outbox meanwhile. It
 also runs without Redis: reservations are then
 decided by its database alone, still correctly, and it logs one WARN per outage.
-catalog-service does not use Kafka yet (its status consumer comes next). It runs
-without Redis (listings are then read from its database, one WARN per outage)
+catalog-service: the REST API still works and the status consumer catches up
+once the broker is back (until then a deactivated merchant's products stay
+listed). It runs without Redis (listings are then read from its database, one WARN per outage)
 and without inventory-service (listings show availability `UNKNOWN`, and new
 products wait for their stock row, which the relay creates once inventory-service
 is back). Without their database the services do not start.
@@ -66,7 +67,8 @@ is back). Without their database the services do not start.
 ## Trying catalog-service's REST API by hand
 
 Start identity-service, merchant-service, inventory-service and catalog-service
-(H2 is fine; Redis optional, Kafka not needed), each from a PowerShell window in
+(H2 is fine; Redis optional; Kafka needed only for merchant status changes,
+below), each from a PowerShell window in
 which the same internal key is set first (any value of at least 32 characters):
 
 ```
@@ -82,7 +84,8 @@ it (the admin is the placeholder identity-service seeds):
 
 ```
 $admin = (Invoke-RestMethod -Method Post http://localhost:8080/auth/login -ContentType 'application/json' -Body '{"email":"admin-placeholder@basketry.example","password":"ChangeMe-Before-Deploy!"}').accessToken
-$shopId = (Invoke-RestMethod -Method Post http://localhost:8082/merchants -Headers @{ Authorization = "Bearer $admin" } -ContentType 'application/json' -Body '{"name":"Tea House","category":"Groceries","kycVerified":true,"commissionRate":5.00,"loginEmail":"tea@example.com","initialPassword":"Tea-Pass1"}').id
+$onboarded = Invoke-RestMethod -Method Post http://localhost:8082/merchants -Headers @{ Authorization = "Bearer $admin" } -ContentType 'application/json' -Body '{"name":"Tea House","category":"Groceries","kycVerified":true,"commissionRate":5.00,"loginEmail":"tea@example.com","initialPassword":"Tea-Pass1"}'
+$shopId = $onboarded.id
 $shop = (Invoke-RestMethod -Method Post http://localhost:8080/auth/login -ContentType 'application/json' -Body '{"email":"tea@example.com","password":"Tea-Pass1"}').accessToken
 ```
 
@@ -128,8 +131,29 @@ inventory-service answers its calls 401: the stock-row relay keeps retrying
 key is set and catalog-service restarted, the relay creates every waiting stock
 row.
 
-catalog-service does not use Kafka yet: its `merchant.status.changed` consumer
-comes next, and until then a deactivated merchant's products stay listed.
+### A merchant deactivated and reactivated
+
+With Kafka running (`docker compose up -d --wait`) and catalog-service started
+after it or before it (it waits for the broker and for the topic), deactivate
+the merchant as Admin and read the listing again:
+
+```
+Invoke-RestMethod -Method Patch "http://localhost:8082/merchants/$($onboarded.merchantCode)" -Headers @{ Authorization = "Bearer $admin" } -ContentType 'application/json' -Body '{"active":false}'
+Invoke-RestMethod "http://localhost:8081/products?merchantId=$shopId" | ConvertTo-Json -Depth 5
+Invoke-RestMethod "http://localhost:8081/internal/products?ids=$productId" -Headers @{ 'X-Internal-Api-Key' = $env:BASKETRY_INTERNAL_API_KEY } | ConvertTo-Json -Depth 5
+```
+
+merchant-service publishes `merchant.status.changed` from its outbox within a
+second, and catalog-service applies it: the merchant's products leave the public
+listing (the cache is invalidated after the change commits), the public detail
+answers 404, and the internal answer shows `merchantActive: false`. The first
+status change ever creates the topic, and catalog-service notices a new topic
+within 10 s, so the first change can take that long; later ones take about a
+second. `{"active":true}` brings the products back. A record catalog-service can
+never apply goes to its own dead-letter topic,
+`merchant.status.changed.catalog-service.DLT` (identity-service has its own,
+`merchant.status.changed.DLT`), with the record's exact bytes and two headers:
+the exception class and a message that never quotes the value.
 ## Sending payment-service a request by hand
 
 order-service will own the two request topics and does not exist yet, and the
@@ -368,13 +392,13 @@ value. Never change a counter by hand to fix stock: use the adjustment
 endpoint (above), and the counter follows.
 
 **catalog-service's listing cache** has a version per scope
-(`catalog:v1:ver:all`, `catalog:v1:ver:m:<merchantId>`) and pages under
-`catalog:v1:list:...` that expire after 60 s. A product change bumps the
-versions, so old pages are never read again:
+(`catalog:v2:ver:all`, `catalog:v2:ver:m:<merchantId>`) and pages under
+`catalog:v2:list:...` that expire after 60 s. A product change or a merchant
+status change bumps the versions, so old pages are never read again:
 
 ```
-docker compose exec redis redis-cli --scan --pattern "catalog:v1:*"
-docker compose exec redis redis-cli TTL catalog:v1:ver:all
+docker compose exec redis redis-cli --scan --pattern "catalog:v2:*"
+docker compose exec redis redis-cli TTL catalog:v2:ver:all
 ```
 
 A version answers TTL `-1` (never evicted), a page a number up to 60.
@@ -387,7 +411,8 @@ other: `docker compose down` keeps both, `docker compose down -v` wipes both,
 also the Postgres data when you did not pass `--profile postgres`. Never wipe
 only one of them: without Kafka's data, events already sent but not yet read by
 identity-service are lost; without Postgres's, the version problem below comes
-back.
+back, and catalog-service, whose consumer group keeps its offset in Kafka, never
+reads the old status events again, so every merchant reads as active.
 
 - **On Postgres**, each service can be restarted on its own.
 - **Redis** can be restarted or wiped at any time: it holds nothing that

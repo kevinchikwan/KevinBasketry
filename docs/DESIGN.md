@@ -273,7 +273,7 @@ detected, because an event carries the full state. Every merchant's events are
 stored, also before it has products. On PostgreSQL two instances inserting the
 same new merchant at once can make one fail on the primary key; that is a
 database error, which the consumer retries, and the retry then updates. The
-consumer itself comes on Day 13 (Section 5).
+consumer is described in Section 5 (the catalog-service consumer).
 
 **Visibility** (FR-B3, FR-B6, FR-A3). The public listing shows a product only if
 it is active **and** its merchant is active. Products with zero stock stay
@@ -1276,7 +1276,7 @@ react to explicit requests, not infer action from a general-purpose
 success event meant for other services.
 
 **`merchant.status.changed`** (merchant-service publishes it; identity-service
-consumes it, see below; catalog-service comes later):
+and catalog-service consume it, see below):
 - **`version`** increases by one with every status change of that merchant,
   and the Kafka key is `merchantId`, as a string. A consumer ignores an event
   whose `version` is not newer than the one it has already applied. That
@@ -1395,6 +1395,60 @@ consumes it, see below; catalog-service comes later):
   fix is safe, because of the version check.
 - **Switch:** `basketry.merchant-status.consumer.enabled`, off in tests, which
   call the handler directly unless a test class turns the listener on.
+
+**The catalog-service consumer** keeps the local `merchant_status` copy in step
+(Section 2, catalog-service). The same as identity-service's consumer: one
+listener thread, `auto.offset.reset=earliest`, the container committing after
+each record, `metadata.max.age.ms` 10 s, Kafka not needed to start, a missing
+topic normal and never created here, database errors retried with no limit
+(seeking back, 1, 2, 4 … up to 60 s), everything else dead-lettered, and the
+switch `basketry.merchant-status.consumer.enabled`, off in tests. Only the
+differences:
+- **Group id `catalog-service`.** It reads the topic from its beginning, but
+  only as far back as the topic's retention reaches (Section 6).
+- **Applying an event** is the conditional `MERGE` of Section 2: it inserts the
+  row of a merchant it has not seen, so there is no "no linked account" case.
+  A merchant's status is stored also before it has products.
+- **The listener only parses the record and calls `MerchantStatusService`,
+  and never runs inside a transaction.** The `MERGE` commits on its own, and
+  only an event that changed the row then invalidates the listings that can
+  show the merchant's products (`all` and `m:<merchantId>`, Section 2),
+  **after the commit**. The invalidator refuses to run inside a transaction,
+  so a transactional listener would roll every status change back and send it
+  to the dead-letter topic; a test checks that no transaction is open at
+  either point. A duplicate, equal or older event invalidates nothing.
+- **Redis never fails a record.** Every Redis call goes through the cache guard
+  (Section 2), which turns any error into "unavailable"; the event is still
+  applied, its offset committed, and a WARN says the listings may be stale. They
+  are, for at most the 60 s page TTL. After a failure the guard skips Redis for
+  10 s (`skip-after-failure`), so a bump in that window is skipped too; the TTL
+  still bounds the staleness.
+- **Two instances inserting the same new merchant at once** (a rolling update):
+  on PostgreSQL the second `MERGE` fails on the primary key. That is a
+  non-transient database error, retried like any other, and the retry takes
+  the `MATCHED` branch (tested on PostgreSQL).
+- **`max.poll.records` is 50**, as in inventory-service: applying an event makes
+  two Redis calls of up to 500 ms each while Redis is slow but still answering,
+  and 500 records a poll would exceed `max.poll.interval.ms`.
+- **Parsing** follows identity-service's rules (`schemaVersion` checked first and
+  only `1`, `merchantId` and `version` positive whole JSON numbers that fit 64
+  bits, `active` a JSON boolean, unknown fields ignored), checked by hand on the
+  JSON tree as inventory-service does. Two deliberate differences from
+  identity-service: **a repeated field is refused** (otherwise the last one
+  would win, and `"active":false,"active":true` would undo a deactivation), and
+  so is **anything after the object**. The Kafka key is not checked against
+  `merchantId`.
+- **Dead-letter topic: `merchant.status.changed.catalog-service.DLT`**, its own,
+  never identity-service's: one owner per dead-letter topic, so a dead letter
+  always says whose failure it was. 3 partitions, keyed like the original (the
+  producer picks the partition by key), created before its first publish, not
+  at startup. **Exception headers follow inventory-service's rule**: only our
+  two, the exception class and a message that never quotes a value (for an
+  unexpected exception, a fixed text pointing to the log). Nothing in the
+  record is secret, but a dead letter then never carries text from the record
+  into a header or a log line. Replaying a dead letter by hand to the original
+  topic is safe (the version check), and also reaches identity-service, which
+  ignores what it already applied.
 
 **payment-service results** (`order.merchant.charged`, `order.merchant.declined`,
 `order.merchant.refunded`; the rules for repeats are in Section 2,
@@ -1658,9 +1712,21 @@ at-least-once delivery means duplicates are expected, not exceptional.
   endpoint to clean up.
 - Known limitation, accepted for now: `merchant.status.changed` keeps the
   default retention of 7 days. A consumer that is down for longer loses the
-  events it missed, and its cached `merchantActive` stays wrong. **Fix before
-  deployment:** turn on topic compaction, which keeps the latest event of every
-  `merchantId` for good.
+  events it missed, and its cached `merchantActive` stays wrong. **catalog-service
+  depends on it more**: its group is new, and reads the topic from its
+  beginning only back to the retention. A merchant deactivated more than 7 days
+  before catalog-service's group first starts is never seen, reads as active
+  at version 0, and its products stay listed. **Fix before deployment:**
+  `cleanup.policy=compact` on `merchant.status.changed`. The key is the
+  `merchantId` and every event carries the full state, so compaction keeps
+  exactly the latest event of every merchant for good, which is all a consumer
+  needs. merchant-service declares the topic, so the setting goes there; a
+  topic already created (in local development, by an earlier run) keeps its
+  old config until it is altered (`kafka-configs.sh --alter --entity-type
+  topics --entity-name merchant.status.changed --add-config
+  cleanup.policy=compact`). Not a bootstrap call from catalog-service to
+  merchant-service. Listed with the other items to do before deployment
+  (Section 7).
 - Known limitation, accepted for now: the merchant link can read
   `buyerActive = true` just before a deactivation commits, which leaves a
   deactivated buyer linked. Both changes survive and login is still refused
@@ -1730,7 +1796,7 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   every internal call, so merchant onboarding fails. `merchant-service`
   also needs `BASKETRY_IDENTITY_URL` (in a ConfigMap; not a secret) to reach
   identity-service for the JWKS and for merchant-link. identity-service,
-  merchant-service, payment-service and inventory-service need
+  merchant-service, payment-service, inventory-service and catalog-service need
   `BASKETRY_KAFKA_BOOTSTRAP_SERVERS` (also a ConfigMap) to reach Kafka. inventory-service needs
   `BASKETRY_REDIS_HOST` and `BASKETRY_REDIS_PORT` (ConfigMap) and
   `BASKETRY_REDIS_PASSWORD` (Secret; Section 6) to reach Redis, which runs as
@@ -1752,6 +1818,11 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
 - Replace the placeholder admin that `V2__seed_initial_admin.sql` seeds (its
   email and password are public in this repository) before deploying anywhere
   real (Section 2, Admin).
+- Set `cleanup.policy=compact` on `merchant.status.changed` before
+  catalog-service's consumer group first starts anywhere real, and alter the
+  config of a topic that already exists (Section 6). Without it,
+  catalog-service lists the products of a merchant deactivated more than 7 days
+  earlier.
 - Each service owns its database and its own database user, and no service
   reads another's. Locally, one Postgres container holds one database per
   service, to save memory: the boundary is the database, not the server. The
@@ -1807,7 +1878,12 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   Wiping only Kafka would lose events that the relay already marked `SENT`
   but identity-service had not read: its `merchantActive` stays wrong until that
   merchant's next change. Wiping only Postgres would bring back the version
-  problem below.
+  problem below. It also empties catalog-service's `merchant_status` while
+  Kafka keeps its group's committed offset, so the old events are never read
+  again: **every merchant then reads as active, and the products of inactive
+  merchants are listed again**, until each merchant's next status change.
+  identity-service's consumer has the same blind spot, but there it only
+  causes the WARN-and-skip of an event with no linked account (Section 5).
 - **Restarting with H2.** H2 loses everything on every restart, so restart
   **all** services and run `docker compose down -v` together, whichever one you
   meant to restart. Restarting only merchant-service resets its merchant ids and
@@ -1828,7 +1904,8 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   takes over the old product's stock row (200 `ALREADY_EXISTS`), and one of
   another merchant gets a stock-row `CONFLICT` and stays out of stock for good
   (Section 2, catalog-service). Its local merchant statuses are lost too, and
-  every merchant reads as active until its next status event. On Postgres each
+  every merchant reads as active until its next status event: its consumer
+  group's offset is kept in Kafka, so the old events are not read again. On Postgres each
   service can be restarted on its own.
 - **Interim:** REQUIREMENTS asks for the whole system to start with one
   documented command. For now Compose holds Kafka, Redis and Postgres, and the

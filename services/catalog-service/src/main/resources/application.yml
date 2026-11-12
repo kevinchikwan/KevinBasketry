@@ -50,6 +50,48 @@ spring:
       connect-timeout: 500ms
       timeout: 500ms
 
+  # The merchant.status.changed consumer (DESIGN.md Section 5), as identity-service's.
+  kafka:
+    bootstrap-servers: ${BASKETRY_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: catalog-service
+      # Events published before this service first started are still read, back
+      # to the topic's retention (DESIGN.md Section 6).
+      auto-offset-reset: earliest
+      # The container commits after each record is applied, never before.
+      enable-auto-commit: false
+      # Applying an event makes two Redis calls of up to 500 ms each when Redis is
+      # slow but still answering: about 1 s a record. 50 records stay well inside
+      # max.poll.interval.ms (5 minutes); the default of 500 would not.
+      max-poll-records: 50
+      properties:
+        # merchant-service owns the topic, and creates it on the first status
+        # change. Until then it is missing, which is normal; this is how soon
+        # the consumer notices it (the client's default is 5 minutes).
+        allow.auto.create.topics: false
+        metadata.max.age.ms: 10000
+        # Keeps the log readable while the broker is down.
+        reconnect.backoff.max.ms: 10000
+    listener:
+      ack-mode: record
+      concurrency: 1
+      missing-topics-fatal: false
+    # Only for the dead-letter topic. A send either finishes or fails within these limits.
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+    admin:
+      # Startup never touches Kafka: the dead-letter topic is created on first use.
+      auto-create: false
+      operation-timeout: 3s
+      properties:
+        request.timeout.ms: 3000
+        default.api.timeout.ms: 3000
+
   # One timer, the stock-row relay.
   task:
     scheduling:
@@ -98,6 +140,18 @@ basketry:
     # After a failed stock read, listings skip inventory-service for this long
     # (availability UNKNOWN) instead of waiting for a timeout every time.
     skip-after-failure: 10s
+  merchant-status:
+    consumer:
+      enabled: true
+    # Owned and created by merchant-service, never here.
+    topic: merchant.status.changed
+    # catalog-service's own, created here on first use; identity-service has its own.
+    dead-letter-topic: merchant.status.changed.catalog-service.DLT
+    dead-letter-partitions: 3
+    replication-factor: 1
+    # After a database failure: wait 1s, 2s, 4s ... up to 60s, with no limit on attempts.
+    retry-initial: 1s
+    retry-max: 60s
   cache:
     # How long a cached listing page lives. Writes invalidate at once (a new
     # version of the scope); the TTL only removes pages nobody reads any more.
