@@ -1932,7 +1932,14 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   identity-service and merchant-service running to add stock, and runs the
   README's REST, Kafka and `redis-cli` commands as written (`-Postgres` adds a
   restart after a wrong counter: reconciliation must reload it, and a replayed
-  reserve and release must take and give back nothing).
+  reserve and release must take and give back nothing). `scripts/e2e-catalog.ps1`
+  does the same for catalog-service's status consumer and listing cache, with
+  identity-service, merchant-service and inventory-service running: a merchant
+  deactivated and reactivated through the cached listings, a malformed status
+  record in catalog-service's own dead-letter topic, the Redis key prefix, TTLs
+  and policy, and a Redis outage (`-Postgres` adds a forced restart of
+  catalog-service with an event published while it is down: the group must be
+  picked back up from its committed offset).
 - On Postgres, merchant-service's row-lock reads wait at most 5 s for another
   transaction's lock, then answer 503 `MERCHANT_BUSY` (Postgres would otherwise
   wait forever).

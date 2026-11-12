@@ -20,10 +20,12 @@ Built so far: `identity-service` and `merchant-service`, including the
 and `payment-service`, with its Kafka requests, results and dead-letter topics.
 `inventory-service` has its reservations, releases and adjustments (PostgreSQL
 as the gate, Redis as the atomic pre-check), its REST API and its Kafka side.
-In progress: `catalog-service`, whose core and REST API are done (products, the
-Redis listing cache, the stock-row outbox to inventory-service, public reads and
-JWT-secured merchant writes) and its `merchant.status.changed` consumer; its
-end-to-end script comes next.
+`catalog-service` has its products, the Redis listing cache, the stock-row
+outbox to inventory-service, public reads, JWT-secured merchant writes and its
+`merchant.status.changed` consumer. identity-service, payment-service,
+inventory-service and catalog-service are done apart from items that belong to
+deployment; merchant-service still has one open question (the commission rate
+order-service needs, DESIGN.md Section 6).
 [`services/README.md`](services/README.md) has the status of every service and
 how to run the end-to-end checks.
 

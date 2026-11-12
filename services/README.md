@@ -6,11 +6,11 @@ they talk to each other.
 
 | Service | Local port | Status |
 |---|---|---|
-| `identity-service` | 8080 | In progress |
-| `catalog-service` | 8081 | In progress |
+| `identity-service` | 8080 | Done (deployment items open) |
+| `catalog-service` | 8081 | Done (deployment items open) |
 | `merchant-service` | 8082 | In progress |
-| `inventory-service` | 8083 | In progress |
-| `payment-service` | 8084 | In progress |
+| `inventory-service` | 8083 | Done (deployment items open) |
+| `payment-service` | 8084 | Done (deployment items open) |
 | `order-service` | 8085 | Not started |
 | `promotion-service` | 8086 | Not started |
 | `conversation-service` | 8087 | Not started |
@@ -149,11 +149,30 @@ listing (the cache is invalidated after the change commits), the public detail
 answers 404, and the internal answer shows `merchantActive: false`. The first
 status change ever creates the topic, and catalog-service notices a new topic
 within 10 s, so the first change can take that long; later ones take about a
-second. `{"active":true}` brings the products back. A record catalog-service can
-never apply goes to its own dead-letter topic,
+second. `{"active":true}` brings the products back.
+
+A record catalog-service can never apply goes to its own dead-letter topic,
 `merchant.status.changed.catalog-service.DLT` (identity-service has its own,
 `merchant.status.changed.DLT`), with the record's exact bytes and two headers:
-the exception class and a message that never quotes the value.
+the exception class and a message that never quotes the value. To see one, from
+the repo root, produce a record whose `active` is a string (one `key|value` per
+line; Ctrl+C to stop), then read the dead-letter topic:
+
+```
+docker compose exec kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:29092 --topic merchant.status.changed --property parse.key=true --property key.separator="|"
+1|{"schemaVersion":1,"merchantId":1,"active":"false","version":99}
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:29092 --topic merchant.status.changed.catalog-service.DLT --from-beginning --property print.key=true --property print.headers=true --timeout-ms 10000
+```
+
+The dead letter's headers include
+`kafka_dlt-exception-message:active must be a JSON boolean`. identity-service
+reads the same record and sends it to its own dead-letter topic. Nothing else
+changes, and the next status change of merchant 1 is applied as usual.
+
+`scripts/e2e-catalog.ps1` runs all of this, the listing cache checks below and a
+Redis outage against real processes (`-Postgres` adds a restart of
+catalog-service; see Tests).
+
 ## Sending payment-service a request by hand
 
 order-service will own the two request topics and does not exist yet, and the
@@ -399,9 +418,11 @@ status change bumps the versions, so old pages are never read again:
 ```
 docker compose exec redis redis-cli --scan --pattern "catalog:v2:*"
 docker compose exec redis redis-cli TTL catalog:v2:ver:all
+docker compose exec redis redis-cli CONFIG GET maxmemory-policy
 ```
 
-A version answers TTL `-1` (never evicted), a page a number up to 60.
+A version answers TTL `-1` (never evicted), a page a number up to 60, and the
+policy is `volatile-lru`.
 Deleting cache keys by hand is safe but never needed.
 
 ## Restarting
@@ -544,3 +565,43 @@ wait up to 45 s for their partitions. It needs ports 8080, 8082, 8083, 9092 and
 time), and exits with 6 if this README no longer has the exact commands it runs.
 A run takes about 4 minutes, 5 with `-Postgres`. Its logs go to
 `build\e2e\inventory`.
+
+`scripts/e2e-catalog.ps1` does the same for catalog-service, with
+identity-service, merchant-service and inventory-service running too. Every
+command it runs is one of this README's, run as shown: the REST commands of
+"Trying catalog-service's REST API by hand" onboard a merchant, create a product
+and deactivate and reactivate the merchant, the Kafka commands of "A merchant
+deactivated and reactivated" produce the malformed status record and read
+catalog-service's dead-letter topic, and the `redis-cli` commands of "Looking at
+the data" read the cache keys, their TTLs and the eviction policy. It checks
+that the product is listed once its stock row is `CREATED`; that a deactivation
+(the first status change, which also creates the topic) takes it out of both
+cached listings, makes the detail 404, makes `/internal/products` say
+`merchantActive: false` and raises both cache versions by exactly one; that a
+reactivation brings it back; that the malformed record reaches
+`merchant.status.changed.catalog-service.DLT` byte for byte with our two
+headers only, while the real event behind it is still applied; that every
+catalog key has the `catalog:v2:` prefix, versions and an inventory counter have
+TTL -1, a page at most 60 s, and the policy is `volatile-lru`; that with Redis
+stopped the listing still answers from the database and a deactivation still
+hides the product; that the dead-letter topic holds only the one record; and
+that no service log contains the internal API key or a database password of the
+run. inventory-service runs with a counter reconciliation every 5 s, so a
+counter exists for the TTL check.
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\e2e-catalog.ps1
+powershell -ExecutionPolicy Bypass -File scripts\e2e-catalog.ps1 -Postgres
+```
+
+`-Postgres` runs catalog-service on Postgres (the other services stay on H2:
+they are never restarted) and force-stops it halfway. The merchant is
+deactivated while it is down; once restarted, catalog-service must pick its
+consumer group back up from the committed offset and apply that event, which
+waits up to 45 s for the old session to time out (the script reports the
+delay). It needs ports 8080 to 8083, 9092 and 6379 free (`BASKETRY_REDIS_PORT`
+instead of 6379 if set; with `-Postgres` also 5432, or
+`BASKETRY_POSTGRES_PORT`), uses its own Compose project (`basketry-e2e-catalog`;
+the ports are the same, so still run one script at a time), and exits with 6 if
+this README no longer has the exact commands it runs. A run takes about 2
+minutes, 3 with `-Postgres`. Its logs go to `build\e2e\catalog`.
