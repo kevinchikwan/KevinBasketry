@@ -112,7 +112,11 @@ class StockRequestConsumerConfig {
         return backOff;
     }
 
-    /** The container wraps what the listener threw, so the whole chain is searched. */
+    /**
+     * The backoff function gets the listener's own exception, not a container
+     * wrapper; a library can still wrap a database failure, so the whole chain
+     * is searched.
+     */
     static boolean isDatabaseFailure(Throwable failure) {
         for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
             if (cause instanceof DataAccessException || cause instanceof TransactionException) {
