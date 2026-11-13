@@ -8,7 +8,7 @@ they talk to each other.
 |---|---|---|
 | `identity-service` | 8080 | Done (deployment items open) |
 | `catalog-service` | 8081 | Done (deployment items open) |
-| `merchant-service` | 8082 | In progress (GET /internal/merchants for order-service, DESIGN.md Section 3) |
+| `merchant-service` | 8082 | Done (deployment items open) |
 | `inventory-service` | 8083 | Done (deployment items open) |
 | `payment-service` | 8084 | Done (deployment items open) |
 | `order-service` | 8085 | Not started |
@@ -130,6 +130,20 @@ inventory-service answers its calls 401: the stock-row relay keeps retrying
 `PENDING` and out of stock, and listings show availability `UNKNOWN`. Once the
 key is set and catalog-service restarted, the relay creates every waiting stock
 row.
+
+### What order-service reads from merchant-service
+
+At checkout order-service also reads each merchant's live status and commission
+rate from merchant-service's internal endpoint (same window, same key):
+
+```
+Invoke-RestMethod "http://localhost:8082/internal/merchants?ids=$shopId" -Headers @{ 'X-Internal-Api-Key' = $env:BASKETRY_INTERNAL_API_KEY } | ConvertTo-Json -Depth 5
+```
+
+It answers `id`, `active` and `commissionRate` (`5.00`, the scale kept) for each
+merchant that exists, in id order. Without the key, with a wrong one, or with a
+user token instead, it answers a bare 401; with no key configured in
+merchant-service, every call does (DESIGN.md Section 3, merchant-service).
 
 ### A merchant deactivated and reactivated
 

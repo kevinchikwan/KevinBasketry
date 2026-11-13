@@ -2,6 +2,8 @@ package com.basketry.merchant.merchant;
 
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.QueryHint;
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 import org.hibernate.jpa.SpecHints;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -22,6 +24,15 @@ public interface MerchantRepository extends JpaRepository<Merchant, Long> {
     Optional<Merchant> findByMerchantCode(String merchantCode);
 
     Optional<Merchant> findByLoginEmail(String loginEmail);
+
+    /**
+     * For GET /internal/merchants: the merchants that exist among {@code ids},
+     * in id order. A plain read with no row lock, so a PATCH holding a
+     * merchant's lock never makes a checkout wait; the answer is the last
+     * committed state.
+     */
+    @Query("select m from Merchant m where m.id in :ids order by m.id")
+    List<Merchant> findAllByIdInOrderById(Collection<Long> ids);
 
     /**
      * Reads and locks the row, for every read that leads to an update.
