@@ -1,0 +1,104 @@
+server:
+  # Fixed port map in services/README.md.
+  port: 8085
+
+spring:
+  application:
+    name: order-service
+
+  # Default: in-memory H2 in PostgreSQL mode, emptied on every restart. The
+  # "postgres" profile (application-postgres.yml) keeps the data in PostgreSQL.
+  datasource:
+    url: jdbc:h2:mem:orders;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    username: sa
+    password: ""
+
+  # Flyway owns the schema; Hibernate only checks that the entities match it.
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+
+  flyway:
+    locations: classpath:db/migration
+
+  # The four request topics and order.succeeded / order.failed out (DESIGN.md
+  # Section 5). Startup never waits for Kafka: the relay creates the topics on
+  # its first publish.
+  kafka:
+    bootstrap-servers: ${BASKETRY_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    # A send either finishes or fails within these limits.
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+    admin:
+      # Startup never touches Kafka: our topics are created on first use.
+      auto-create: false
+      operation-timeout: 3s
+      properties:
+        request.timeout.ms: 3000
+        default.api.timeout.ms: 3000
+
+  # One timer for now, the outbox relay.
+  task:
+    scheduling:
+      pool:
+        size: 1
+
+# The health endpoint only, with no details.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+
+basketry:
+  identity:
+    # identity-service: GET /accounts/{id}, the live buyer check at checkout.
+    base-url: ${BASKETRY_IDENTITY_URL:http://localhost:8080}
+    connect-timeout: 2s
+    read-timeout: 5s
+  catalog:
+    # catalog-service: GET /internal/products, the re-validation of every line.
+    base-url: ${BASKETRY_CATALOG_URL:http://localhost:8081}
+    connect-timeout: 2s
+    read-timeout: 5s
+  merchant:
+    # merchant-service: GET /internal/merchants, live status and commission rate.
+    base-url: ${BASKETRY_MERCHANT_URL:http://localhost:8082}
+    connect-timeout: 2s
+    read-timeout: 5s
+  internal:
+    # Shared key sent to catalog-service's and merchant-service's /internal/**.
+    # Never committed: comes from the environment (a Kubernetes Secret when
+    # deployed), the same variable the other services read. Unset = a WARN at
+    # startup and every checkout refused with 503; set = at least 32 characters.
+    api-key: ${BASKETRY_INTERNAL_API_KEY:}
+  order:
+    # The key of the Idempotency-Key fingerprint (an HMAC, DESIGN.md Section 2).
+    # Never committed. Unset = a WARN at startup and every checkout refused with
+    # 503; set = at least 32 characters.
+    fingerprint-key: ${BASKETRY_ORDER_FINGERPRINT_KEY:}
+    # A result not in by then counts as failed (the timer comes with the coordinator).
+    saga-deadline: 2m
+  # The request topics, order.succeeded and order.failed, and the relay that publishes the outbox rows.
+  outbox:
+    # Fixed: changing the count later moves keys between partitions and breaks per-order order.
+    partitions: 3
+    replication-factor: 1
+    # Longer than max.block.ms plus delivery.timeout.ms, so the producer gives the answer first.
+    send-timeout: 16s
+    relay:
+      enabled: true
+      interval: 1s
+      batch-size: 100
+      # After a failed pass: wait 1s, 2s, 4s ... up to 60s. A success resets it.
+      backoff-initial: 1s
+      backoff-max: 60s

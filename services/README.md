@@ -11,7 +11,7 @@ they talk to each other.
 | `merchant-service` | 8082 | Done (deployment items open) |
 | `inventory-service` | 8083 | Done (deployment items open) |
 | `payment-service` | 8084 | Done (deployment items open) |
-| `order-service` | 8085 | Not started |
+| `order-service` | 8085 | In progress (checkout, model and outbox built; coordinator, REST API and security next) |
 | `promotion-service` | 8086 | Not started |
 | `conversation-service` | 8087 | Not started |
 | `platform-service` | 8088 | Not started |
@@ -48,7 +48,10 @@ missing, and catalog-service fills its cache again as listings are read. It runs
 with 64 MB and `volatile-lru`: when full, it evicts cached listing pages (they
 have a TTL) and never a stock counter (no TTL; DESIGN.md Section 7).
 
-All five services also run without Kafka. merchant-service:
+All six services also run without Kafka. order-service: a checkout is still
+accepted, and its requests wait in its outbox until the broker is back (a
+checkout does need identity-service, catalog-service and merchant-service: if
+one is down, it is refused with a 503 and nothing is stored). merchant-service:
 `PATCH` still works and the events wait in its outbox until the broker is back.
 identity-service: login and every other request still work, and the status
 consumer catches up once the broker is back. payment-service: the request
@@ -189,11 +192,12 @@ catalog-service; see Tests).
 
 ## Sending payment-service a request by hand
 
-order-service will own the two request topics and does not exist yet, and the
-broker does not create topics by itself, so create them once (they survive
-`docker compose down`, not `down -v`). payment-service creates its own result
-and dead-letter topics. From the repo root, with Compose and payment-service
-running:
+order-service owns the two request topics and creates them on its first publish.
+Without it running, the broker does not create topics by itself, so create them
+once (they survive `docker compose down`, not `down -v`; `--if-not-exists` makes
+this harmless if order-service already did). payment-service creates its own
+result and dead-letter topics. From the repo root, with Compose and
+payment-service running:
 
 ```
 docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 --create --if-not-exists --topic order.merchant-charge.requested --partitions 3 --replication-factor 1
@@ -274,9 +278,9 @@ does. DESIGN.md Section 3 lists every endpoint and rule.
 
 ## Sending inventory-service a request by hand
 
-As for payment-service, order-service will own the two request topics, so
-create them once; inventory-service creates its own result and dead-letter
-topics. Start inventory-service with Kafka (Redis optional) and give a product
+As for payment-service, order-service owns the two request topics; without it
+running, create them once; inventory-service creates its own result and
+dead-letter topics. Start inventory-service with Kafka (Redis optional) and give a product
 some stock first ("Trying inventory-service's REST API by hand" above). From the
 repo root:
 
@@ -324,20 +328,23 @@ the first start.
   ```
 
   After stopping `bootRun`, check that no JVM is still holding the port
-  (8080 to 8084); stop it if there is.
+  (8080 to 8085); stop it if there is.
 
 | Variable | Default (local only) | Used by |
 |---|---|---|
 | `BASKETRY_POSTGRES_HOST` | `localhost` | every service |
 | `BASKETRY_POSTGRES_PORT` | `5432` | Compose and every service |
-| `BASKETRY_DB_USERNAME` | `identity` / `merchant` / `payment` / `inventory` / `catalog` | each service |
-| `BASKETRY_DB_PASSWORD` | `local-dev-only-identity` / `local-dev-only-merchant` / `local-dev-only-payment` / `local-dev-only-inventory` / `local-dev-only-catalog` | each service |
-| `BASKETRY_IDENTITY_DB_PASSWORD`, `BASKETRY_MERCHANT_DB_PASSWORD`, `BASKETRY_PAYMENT_DB_PASSWORD`, `BASKETRY_INVENTORY_DB_PASSWORD`, `BASKETRY_CATALOG_DB_PASSWORD` | the same five values | Compose's init script |
+| `BASKETRY_DB_USERNAME` | `identity` / `merchant` / `payment` / `inventory` / `catalog` / `orders` | each service |
+| `BASKETRY_DB_PASSWORD` | `local-dev-only-identity` / `local-dev-only-merchant` / `local-dev-only-payment` / `local-dev-only-inventory` / `local-dev-only-catalog` / `local-dev-only-orders` | each service |
+| `BASKETRY_IDENTITY_DB_PASSWORD`, `BASKETRY_MERCHANT_DB_PASSWORD`, `BASKETRY_PAYMENT_DB_PASSWORD`, `BASKETRY_INVENTORY_DB_PASSWORD`, `BASKETRY_CATALOG_DB_PASSWORD`, `BASKETRY_ORDER_DB_PASSWORD` | the same six values | Compose's init script |
 | `BASKETRY_POSTGRES_ADMIN_PASSWORD` | `local-dev-only-admin` (user `postgres`) | Compose |
 | `BASKETRY_REDIS_HOST` | `localhost` | inventory-service, catalog-service |
 | `BASKETRY_REDIS_PORT` | `6379` | Compose, inventory-service, catalog-service |
 | `BASKETRY_REDIS_PASSWORD` | empty (no password locally) | inventory-service, catalog-service |
 | `BASKETRY_INVENTORY_URL` | `http://localhost:8083` | catalog-service |
+| `BASKETRY_CATALOG_URL` | `http://localhost:8081` | order-service |
+| `BASKETRY_MERCHANT_URL` | `http://localhost:8082` | order-service |
+| `BASKETRY_ORDER_FINGERPRINT_KEY` | none: unset, every checkout is refused (503) | order-service (at least 32 characters, like the internal key) |
 
 The defaults are for local development only, and a service logs a WARN at
 startup when it uses one. Each service has its own database and user, and no
@@ -368,6 +375,15 @@ also predates `payment` needs the same three statements for `payment`.
 docker compose exec postgres psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE catalog LOGIN PASSWORD 'local-dev-only-catalog';" -c "CREATE DATABASE catalog OWNER catalog;" -c "REVOKE CONNECT, TEMPORARY ON DATABASE catalog FROM PUBLIC;"
 ```
 
+**The `orders` database is new too** (order-service's; `order` is an SQL keyword).
+The same choice: `docker compose down -v` (wiping everything), or, keeping all
+data, create it in the running container (change the password if you overrode
+`BASKETRY_ORDER_DB_PASSWORD`):
+
+```
+docker compose exec postgres psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE orders LOGIN PASSWORD 'local-dev-only-orders';" -c "CREATE DATABASE orders OWNER orders;" -c "REVOKE CONNECT, TEMPORARY ON DATABASE orders FROM PUBLIC;"
+```
+
 The Redis change to `volatile-lru` needs nothing: Redis keeps no data, so
 `docker compose up -d --wait` recreates it with the new setting.
 
@@ -381,6 +397,7 @@ docker compose exec postgres psql -U merchant merchant
 docker compose exec postgres psql -U payment payment
 docker compose exec postgres psql -U inventory inventory
 docker compose exec postgres psql -U catalog catalog
+docker compose exec postgres psql -U orders orders
 ```
 
 Then for example `\dt`, `select * from account;`, `\q` to quit.
@@ -404,11 +421,15 @@ browsing cannot change a row by accident. The tables: `account`,
 `admin_account` (identity), `merchant`, `outbox_event` (merchant),
 `payment_transaction`, `outbox_event` (payment), `stock_level`,
 `stock_reservation`, `outbox_event` (inventory), `product`, `merchant_status`,
-`stock_row_request` (catalog), and `flyway_schema_history` in
-each. For inventory-service, use `inventory` as user and database and
+`stock_row_request` (catalog), `customer_order`, `merchant_charge`, `order_line`,
+`outbox_event` (orders), and `flyway_schema_history` in each. For
+inventory-service, use `inventory` as user and database and
 `local-dev-only-inventory` as password; for catalog-service, `catalog` and
-`local-dev-only-catalog`. `payment_transaction` holds only the
-last 4 digits of a card number, never the full number.
+`local-dev-only-catalog`; for order-service, `orders` and `local-dev-only-orders`.
+`payment_transaction` holds only the last 4 digits of a card number, never the
+full number. order-service's `outbox_event` holds a charge request's full card
+number only while the row is `PENDING`; once `SENT` or `CANCELLED` its
+`cardNumber` is null.
 
 **The stock counters in Redis**, while Compose runs (one key per product,
 `inventory:stock:<productId>`; a missing key means "not loaded", not zero):
@@ -470,6 +491,10 @@ reads the old status events again, so every merchant reads as active.
   inventory-service keeps the old stock rows: a new product takes over an old
   one's stock row (same merchant) or stays out of stock with a `CONFLICT` (another
   merchant), and every merchant reads as active until its next status change.
+  Restarting only order-service loses every order and starts order ids at 1
+  again, while payment-service and inventory-service keep their rows keyed by
+  the order id: a new order 7 then gets the stored answers of the old order 7
+  instead of being decided (DESIGN.md Section 2, order-service).
 
 ## Tests
 

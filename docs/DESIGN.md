@@ -742,7 +742,10 @@ open during a call to another service.
    the same fingerprint is answered as it stands now (200, Section 3); the same
    key with another fingerprint is 409 `IDEMPOTENCY_KEY_REUSED`. Nothing below
    runs again for a replay.
-5. **Three synchronous calls**, then the cart rules:
+5. **Three synchronous calls**, then the cart rules. First, the internal key
+   must be configured, else 503 `INTERNAL_API_KEY_NOT_CONFIGURED` before any
+   call. It is checked here, after the idempotency lookup, because a replay
+   calls nothing and is still answered without the key.
    - identity-service `GET /accounts/{buyerAccountId}`, with the buyer's own
      token forwarded (the endpoint allows "self"). `buyerActive = false` is 403
      `BUYER_DEACTIVATED`; a 404 (data loss) is 403 `BUYER_NOT_FOUND`. The
@@ -925,7 +928,9 @@ row lock:
 - the charge request's outbox row, until it is `SENT` or `CANCELLED`. The same
   update that marks it replaces `cardNumber` in the payload with `null`, so a
   replay of the stored payload by hand is dead-lettered by payment-service,
-  never charged;
+  never charged. Every other field keeps its exact text (`2.50` stays `2.50`:
+  the payload is re-read with decimals as BigDecimal). A row the relay could not
+  publish keeps the number for the retry;
 - the request topic and payment-service's dead-letter topic (Section 5), for
   the topic's retention of 7 days;
 - PostgreSQL's write-ahead log and the old row version, until they are
@@ -934,7 +939,16 @@ row lock:
 
 The fingerprint holds it only inside a keyed HMAC. A test sends a sentinel
 number down every path (checkout, replay, 400s, relay, cancel, every log at
-DEBUG) and checks every log line and every stored value.
+DEBUG, Spring Kafka at TRACE) and checks every log line and every stored value.
+
+**Logging that would print it**, so never run these at TRACE in order-service:
+`org.hibernate.orm.jdbc.bind` (Hibernate's parameter logging prints the
+outbox payload while it is PENDING), `org.apache.kafka.clients` and
+`org.springframework.kafka.core.DefaultKafkaProducerFactory` (both print whole
+records; Section 5). Everything Spring Kafka logs of a record otherwise is its
+topic and partition only (the record formatter), and a failed send is logged
+by order-service's own producer listener with the topic and the key: Spring
+Boot's default one logs up to 100 characters of the value at ERROR.
 
 **orderId and H2.** `orderId` is payment-service's and inventory-service's
 idempotency key. If order-service restarts on H2 while they keep their data,
@@ -1460,8 +1474,12 @@ and includes no other service.
     unitPrice}]` and `total`, the current ones.
   - 503, nothing created: `IDENTITY_UNAVAILABLE`, `CATALOG_UNAVAILABLE`,
     `MERCHANT_UNAVAILABLE` (a timeout, connection failure, 5xx, or a 401
-    meaning the API keys differ, logged as an ERROR); connect 2 s, read 5 s, no
-    retry inside the request: the client retries with the same key.
+    meaning the API keys differ, logged as an ERROR; also any other status the
+    service never sends for a valid call, and an answer that cannot be read, such
+    as a missing or wrongly typed field, an unknown stock-row status, a price
+    with more than 2 decimal places or a rate outside 0.00 to 100.00, each logged
+    as an ERROR and never guessed); connect 2 s, read 5 s, no retry inside the
+    request: the client retries with the same key.
     `INTERNAL_API_KEY_NOT_CONFIGURED`, `FINGERPRINT_KEY_NOT_CONFIGURED`.
 - `GET /orders/{reference}`. The buyer who placed it, a merchant with a line in
   it (a token with `MERCHANT`; its `merchantId` claim), or Admin. A reference
@@ -2348,7 +2366,7 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   catalog-service's listing cache, and, with the
   Compose profile `postgres`, one Postgres (`postgres:17.11-alpine`) holding a
   database and a user per service (`identity`, `merchant`, `payment`,
-  `inventory`, `catalog`). `docker compose up -d --wait` starts Kafka and Redis;
+  `inventory`, `catalog`, `orders`). `docker compose up -d --wait` starts Kafka and Redis;
   `docker compose --profile postgres up -d --wait` starts all three. Services
   run from IntelliJ reach Kafka at `localhost:9092` (other containers on the
   Compose network at `kafka:29092`), Redis at `localhost:6379`

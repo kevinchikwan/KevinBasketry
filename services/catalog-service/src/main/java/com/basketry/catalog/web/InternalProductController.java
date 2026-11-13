@@ -12,7 +12,8 @@ import org.springframework.web.bind.annotation.RestController;
  * GET /internal/products?ids=1,2,3, for order-service's re-validation of every
  * checkout line (DESIGN.md Section 3, catalog-service): the real check of
  * purchasability, not the listing. Internal key only, in its own security
- * chain. Provisional until order-service is built.
+ * chain. order-service reads the live merchant status and the commission rate
+ * from merchant-service's GET /internal/merchants, not from here.
  */
 @RestController
 public class InternalProductController {
