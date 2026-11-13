@@ -138,10 +138,22 @@ Explicitly out of scope for this version:
 - FR-B12: Buyer can enter one coupon code at checkout. The system applies
   it only to the line items it's eligible for (see Section 9) and shows
   the buyer the discounted total before confirming.
+- FR-B15: Checkout is idempotent. Sending the same checkout again (a retry
+  after a lost response or a double click) never creates a second order or a
+  second charge: the buyer gets the order the first attempt created. Reusing
+  the same checkout attempt for a different cart is refused.
+- FR-B16: A merchant cannot buy its own products. A checkout from an account
+  linked to a merchant is refused for any line of that merchant's products.
+- FR-B17: The buyer is never charged a total other than the one shown before
+  confirming. If a price changed meanwhile, checkout is refused with the
+  current prices, and nothing is charged.
 
 ### 5.4 Order history
 - FR-B13: Buyer can see their own order history with full per-line status,
   including any coupon discount applied.
+- FR-B18: For a failed order whose refunds or stock releases are still in
+  progress, the buyer sees that the order has failed and is being reversed
+  (status `FAILING`), not an order still pending.
 - FR-B14: Buyer can open a message thread on an order with a specific
   merchant in that order (e.g. a delivery instruction or a question about
   a declined line), and send further messages in that thread. If the
@@ -246,6 +258,12 @@ Explicitly out of scope for this version:
   platform coupon applies across every merchant's line items in the cart.
 - FR-A10: Admin can deactivate a platform coupon early.
 
+### 7.6 Order support
+- FR-A11: Admin can list the orders that need attention: failed orders with
+  a refund or stock release that was never confirmed, after the system's
+  automatic retries. Admin can see each such order in full, to repair the
+  cause by hand.
+
 ## 8. Commission model
 
 - Each `Merchant` has a `commissionRate` (percentage, e.g. 5.00 for 5%),
@@ -315,6 +333,13 @@ automatically refunded, any stock reserved for it is released, and the
 buyer sees a single `FAILED` order with the decline reason for whichever
 merchant caused it.
 
+While those refunds and releases are still outstanding, the order is
+`FAILING`: the all-or-nothing decision is already made (the order has
+failed), and the buyer sees that it is being reversed. It becomes `FAILED`
+once every refund and release is confirmed. `FAILING` is not a partial
+success; there is still no state in which an order keeps some merchants'
+charges (see `DESIGN.md` Section 2, order-service).
+
 **Implementation implication:** because each merchant is authorized
 independently (in parallel), "all-or-nothing" isn't free — it requires a
 compensating action for every leg that succeeded: a refund for each
@@ -326,8 +351,9 @@ out of scope (see Section 3).
 **Rejected alternative:** partial success (charge who you can, flag who
 declined). Considered first, but rejected as the final design because an
 all-or-nothing cart is the more familiar and expected checkout behavior
-for a buyer, and keeps order status simple (succeed/fail) rather than
-introducing a third, harder-to-reason-about state.
+for a buyer, and keeps the outcome simple (succeed/fail) rather than
+introducing a partial outcome that is harder to reason about. (`FAILING`,
+above, is a failed order on its way to `FAILED`, not a third outcome.)
 
 ## 11. Acceptance criteria (high level)
 

@@ -2,24 +2,41 @@ sequenceDiagram
     participant Buyer
     participant OrderSvc as order-service
     participant IdentitySvc as identity-service
+    participant CatalogSvc as catalog-service
+    participant MerchantSvc as merchant-service
     participant PromoSvc as promotion-service
     participant PaymentSvc as payment-service
     participant Kafka
     participant InvSvc as inventory-service
     participant PlatformSvc as platform-service
 
-    Buyer->>OrderSvc: POST /orders/checkout (cart, coupon?, cardNumber)
-    OrderSvc->>IdentitySvc: GET /accounts/{id} (sync, live buyer-active check)
-    IdentitySvc-->>OrderSvc: buyerActive
-    break buyer deactivated
-        OrderSvc-->>Buyer: rejected (account deactivated), nothing started
+    Buyer->>OrderSvc: POST /orders/checkout + Idempotency-Key (lines, coupon?, cardNumber, expectedTotal)
+    opt same key seen before
+        OrderSvc-->>Buyer: 200 the order as it stands (same body) or 409 IDEMPOTENCY_KEY_REUSED
     end
-    OrderSvc->>PromoSvc: GET /coupons/validate (sync)
-    PromoSvc-->>OrderSvc: valid, discount amount
+    OrderSvc->>IdentitySvc: GET /accounts/{id} (sync, buyer's token, live buyer-active check)
+    IdentitySvc-->>OrderSvc: buyerActive, merchantId
+    break buyer deactivated
+        OrderSvc-->>Buyer: 403 BUYER_DEACTIVATED, nothing created
+    end
+    OrderSvc->>CatalogSvc: GET /internal/products?ids= (sync, internal key)
+    CatalogSvc-->>OrderSvc: price, active, merchantActive, stockRow per product
+    OrderSvc->>MerchantSvc: GET /internal/merchants?ids= (sync, internal key)
+    MerchantSvc-->>OrderSvc: active, commissionRate per merchant
+    break a line not purchasable, or the total is not expectedTotal
+        OrderSvc-->>Buyer: 409 CART_NOT_PURCHASABLE or PRICE_CHANGED, nothing created
+    end
+    opt couponCode (refused with 400 until promotion-service exists)
+        OrderSvc->>PromoSvc: GET /coupons/validate (sync)
+        PromoSvc-->>OrderSvc: valid, discount amount
+    end
+    Note over OrderSvc,PromoSvc: any service unavailable: 503, nothing created
 
-    OrderSvc->>OrderSvc: create Order (PENDING)
-    OrderSvc->>Kafka: publish MerchantChargeRequested (per merchant)
-    OrderSvc->>Kafka: publish StockReserveRequested (per product line)
+    OrderSvc->>OrderSvc: one transaction: Order PENDING, legs, commission rate snapshot, outbox rows
+    OrderSvc-->>Buyer: 202 Location /orders/{reference}
+    Note over Buyer,OrderSvc: the Buyer app polls GET /orders/{reference} from here on
+    OrderSvc->>Kafka: relay publishes MerchantChargeRequested (per merchant)
+    OrderSvc->>Kafka: relay publishes StockReserveRequested (per product line)
 
     par For each merchant
         Kafka->>PaymentSvc: MerchantChargeRequested
@@ -40,29 +57,42 @@ sequenceDiagram
         end
     end
 
-    Kafka->>OrderSvc: all charge results + all reservation results
+    Kafka->>OrderSvc: charge results + reservation results
+    Note over OrderSvc: each result applied under the order's row lock, so one decides
 
     alt all merchants charged AND all stock reserved
         OrderSvc->>OrderSvc: Order.status = SUCCEEDED
-        OrderSvc->>Kafka: publish OrderSucceeded
+        OrderSvc->>Kafka: publish OrderSucceeded (with commission per merchant)
         Kafka->>PromoSvc: OrderSucceeded (mark coupon used)
         Kafka->>PlatformSvc: OrderSucceeded (update GMV/commission projection)
         Note over InvSvc: no action needed - stock already<br/>committed at reservation time
-        OrderSvc-->>Buyer: 200 order succeeded
-    else at least one declined OR out of stock
+    else at least one declined OR out of stock OR no result by the deadline (2 min)
+        OrderSvc->>OrderSvc: Order.status = FAILING (unanswered legs TIMED_OUT, unsent requests cancelled)
         par Compensate charged merchants
-            OrderSvc->>Kafka: publish MerchantRefundRequested (per already-charged merchant)
+            OrderSvc->>Kafka: publish MerchantRefundRequested (per charged merchant)
             Kafka->>PaymentSvc: MerchantRefundRequested
             PaymentSvc->>PaymentSvc: refund
             PaymentSvc->>Kafka: MerchantRefunded
         and Compensate reserved stock
-            OrderSvc->>Kafka: publish StockReleaseRequested (per already-reserved product)
+            OrderSvc->>Kafka: publish StockReleaseRequested (per reserved line, and per line with no result)
             Kafka->>InvSvc: StockReleaseRequested
-            InvSvc->>InvSvc: Postgres delete reservation + increment, then Redis increment
+            InvSvc->>InvSvc: Postgres mark reservation RELEASED + increment (or tombstone), then Redis increment
             InvSvc->>Kafka: StockReleased
         end
-        Kafka->>OrderSvc: all refunds + all releases confirmed
+        opt a refund or release not confirmed
+            OrderSvc->>Kafka: resend, 3 times, 1 min apart
+            OrderSvc->>OrderSvc: then leg STUCK, order stays FAILING, needsAttention for Admin
+        end
+        Kafka->>OrderSvc: all refunds + all releases confirmed, every leg settled
         OrderSvc->>OrderSvc: Order.status = FAILED
-        OrderSvc->>Kafka: publish OrderFailed
-        OrderSvc-->>Buyer: 200 order failed (reason: declined merchant or out-of-stock line, others auto-reversed)
+        OrderSvc->>Kafka: publish OrderFailed (reasons per failed leg)
+    end
+
+    opt late MerchantCharged for a leg that timed out
+        Kafka->>OrderSvc: MerchantCharged
+        OrderSvc->>OrderSvc: FAILED back to FAILING
+        OrderSvc->>Kafka: publish MerchantRefundRequested
+        Kafka->>OrderSvc: MerchantRefunded
+        OrderSvc->>OrderSvc: Order.status = FAILED
+        OrderSvc->>Kafka: publish OrderFailed again (new eventId)
     end

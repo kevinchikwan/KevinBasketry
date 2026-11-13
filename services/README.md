@@ -8,7 +8,7 @@ they talk to each other.
 |---|---|---|
 | `identity-service` | 8080 | Done (deployment items open) |
 | `catalog-service` | 8081 | Done (deployment items open) |
-| `merchant-service` | 8082 | In progress |
+| `merchant-service` | 8082 | In progress (GET /internal/merchants for order-service, DESIGN.md Section 3) |
 | `inventory-service` | 8083 | Done (deployment items open) |
 | `payment-service` | 8084 | Done (deployment items open) |
 | `order-service` | 8085 | Not started |

@@ -37,10 +37,10 @@ the owning service's API):
 |---|---|---|
 | `identity-service` | Accounts, auth, buyer/merchant linkage | consumes `merchant.status.changed` (cached `merchantActive`); otherwise foundational — everything else validates tokens issued here |
 | `catalog-service` | Products (with a free-text category) | consumes `merchant.status.changed` (cached `merchantActive`); `inventory-service` (creates stock rows, reads availability); Redis (read-through cache of listings) |
-| `merchant-service` | Merchant profile, onboarding, commission rate, KYC | `identity-service` (creating merchant login); publishes `merchant.status.changed` (Section 5) |
+| `merchant-service` | Merchant profile, onboarding, commission rate, KYC | `identity-service` (creating merchant login); publishes `merchant.status.changed` (Section 5); serves `order-service` the live status and commission rate (`GET /internal/merchants`) |
 | `inventory-service` | Stock counts | consumes stock reserve/release request events (Section 5), Redis (atomic pre-check) |
 | `payment-service` | Deterministic authorization mock (card-number lookup table) | — (no outbound dependencies) |
-| `order-service` | Checkout orchestration, saga coordination (no cart state — cart is client-side) | `identity-service` (live buyer-active check at checkout), `catalog-service`, `promotion-service`, publishes/consumes checkout events |
+| `order-service` | Checkout orchestration, saga coordination (no cart state — cart is client-side) | `identity-service` (live buyer-active check at checkout), `catalog-service` (re-validation of every line), `merchant-service` (live status and commission rate), `promotion-service` (not yet: coupons are refused until it exists), publishes/consumes checkout events |
 | `promotion-service` | Coupons | consumes `OrderSucceeded` / `OrderFailed` events |
 | `conversation-service` | Order-scoped message threads | `order-service` (validating order/merchant references) |
 | `platform-service` | Admin read-model: GMV, commission, order stats | consumes `OrderSucceeded` events (CQRS-style projection) |
@@ -480,7 +480,8 @@ new outbox row, because the first publish may have been lost:
 | release | store a `FAILED` **tombstone** (`RELEASED_BEFORE_RESERVE`), WARN; `released` | `RESERVED` → `RELEASED` in one conditional update, give the **stored** quantity back; `released` | `released` | `released` (nothing was taken) |
 
 - The tombstone exists because a release can come before its reserve once
-  order-service gives up on a reservation that never answered (Section 6).
+  order-service gives up on a reservation that never answered (Section 2,
+  order-service: the timer).
   The late reserve then fails with `RELEASED_BEFORE_RESERVE` and takes
   nothing; without the tombstone it would take stock nobody releases.
 - Two overlapping releases move the row once: the second update matches no
@@ -675,34 +676,270 @@ compensating refunds) is therefore verified by **integration tests** that
 publish fake `MerchantCharged` / `MerchantDeclined` events directly to
 `order-service`'s consumer, bypassing `payment-service`. It is validated
 by tests, not by a live demo. There is deliberately no per-merchant
-override in the mock.
+override in the mock. A live mixed outcome comes from stock instead: a cart
+with one line out of stock fails while every merchant is charged, so the
+charged merchants are refunded (order-service's end-to-end check will run it).
 
 ### order-service
 ```
-Order
-  id (PK), orderReference (unique)
-  buyerAccountId                -- reference only
-  status: PENDING | SUCCEEDED | FAILED
-  couponCode: nullable
-  totalAmount: BigDecimal
+CustomerOrder                   -- table customer_order (ORDER is an SQL keyword)
+  id (PK)                       -- from customer_order_id_seq; the orderId of every saga event
+  orderReference (unique)       -- ORD- + 20 random base32 characters; the only id the API shows
+  buyerAccountId                -- the token's sub; reference only
+  idempotencyKey                -- the Idempotency-Key header; unique together with buyerAccountId
+  requestFingerprint            -- HMAC-SHA256 of the canonical request (below), hex
+  status: PENDING | SUCCEEDED | FAILING | FAILED
+  needsAttention: boolean       -- true exactly while a leg is STUCK
+  couponCode: nullable          -- always null until promotion-service exists
+  totalAmount: NUMERIC(12, 2)   -- the sum of the merchant charges' amounts
+  deadlineAt                    -- createdAt + the saga deadline (2 min)
   createdAt
+  decidedAt                     -- set when status first leaves PENDING
+  completedAt                   -- set when status becomes SUCCEEDED or FAILED; reset on a reopen
 
-OrderItem
-  id (PK)
-  orderId (FK, same service/DB)
-  productId, merchantId          -- references only, snapshotted at checkout
-  quantity, unitPrice
-  merchantChargeId: nullable     -- correlates to the saga's per-merchant charge attempt
+MerchantCharge                  -- table merchant_charge; the charge leg, one per merchant in the order
+  orderId (FK), merchantId      -- composite PK; payment-service's idempotency key
+  subtotal: NUMERIC(12, 2)      -- the sum of the merchant's line amounts
+  discount: NUMERIC(12, 2)      -- 0.00 until promotion-service exists
+  amount: NUMERIC(12, 2)        -- subtotal - discount; what is charged
+  commissionRate: NUMERIC(5, 2) -- snapshot from merchant-service at checkout
+  commission: NUMERIC(12, 2)    -- amount x commissionRate / 100, HALF_UP, scale 2
+  status: REQUESTED | CHARGED | DECLINED | TIMED_OUT | REFUND_REQUESTED | REFUNDED | STUCK
+  transactionRef                -- set from the charged result
+  reasonCode                    -- the response code of a decline, or NO_RESULT for TIMED_OUT
+  resends, compensationDueAt    -- the refund's resends so far, and when it is next due
+
+OrderLine                       -- table order_line; one per cart line, and its reserve leg
+  orderId (FK), productId       -- composite PK; inventory-service's idempotency key
+  merchantId                    -- snapshot from catalog-service at checkout
+  productName                   -- snapshot, for the order history
+  unitPrice: NUMERIC(12, 2)     -- snapshot of catalog-service's current price
+  quantity: int                 -- 1-1,000
+  lineAmount: NUMERIC(12, 2)    -- unitPrice x quantity (exact, no rounding)
+  status: REQUESTED | RESERVED | FAILED | TIMED_OUT | RELEASE_REQUESTED | RELEASED | STUCK
+  reasonCode                    -- inventory-service's code of a failed reservation, or NO_RESULT
+  resends, compensationDueAt    -- the release's resends so far, and when it is next due
+
+OutboxEvent                     -- as payment-service's, plus CANCELLED
+  id (PK), eventId (unique), topic
+  messageKey                    -- the orderId
+  payload                       -- the exact JSON to publish; card number removed once SENT or CANCELLED
+  status: PENDING | SENT | CANCELLED, attempts, lastError, createdAt, sentAt
 ```
 There is no server-side cart. The cart lives only in the Buyer front-end
 and is sent whole in the `POST /orders/checkout` body. `order-service`
-re-validates every line at checkout (product active, merchant active,
-current price from `catalog-service`) and does not trust the prices or
+re-validates every line at checkout (below) and does not trust the prices or
 availability the client sends. Hiding unavailable products in the UI
 (FR-B6/FR-M6) is a convenience; the real check is server-side.
-`Order.status` is intentionally simpler than the old `COMPLETE` /
-`PARTIALLY_PAID` / `FAILED` — since the all-or-nothing decision means
-there's no partial state to represent (see `REQUIREMENTS.md` Section 10).
+
+**Checkout, in order.** Nothing is stored until step 6, and no transaction is
+open during a call to another service.
+1. **The body** (400 for any broken rule, all named at once; Section 3).
+2. **The capability**: a token without `BUYER` (Admin) gets 403.
+3. **The fingerprint key**: if `BASKETRY_ORDER_FINGERPRINT_KEY` is unset, 503
+   `FINGERPRINT_KEY_NOT_CONFIGURED`, a fixed error, for every checkout.
+4. **The Idempotency-Key**: an order with the same `(buyerAccountId, key)` and
+   the same fingerprint is answered as it stands now (200, Section 3); the same
+   key with another fingerprint is 409 `IDEMPOTENCY_KEY_REUSED`. Nothing below
+   runs again for a replay.
+5. **Three synchronous calls**, then the cart rules:
+   - identity-service `GET /accounts/{buyerAccountId}`, with the buyer's own
+     token forwarded (the endpoint allows "self"). `buyerActive = false` is 403
+     `BUYER_DEACTIVATED`; a 404 (data loss) is 403 `BUYER_NOT_FOUND`. The
+     answer's `merchantId` (the account's live merchant link) is kept for the
+     `OWN_PRODUCT` rule; its email is never stored or logged.
+   - catalog-service `GET /internal/products?ids=` with every line's product,
+     in one call (a cart has at most 100 lines, catalog's limit).
+   - merchant-service `GET /internal/merchants?ids=` with every merchant
+     catalog named, in one call.
+   - **Cart rules.** Every refused line is listed in one 409
+     `CART_NOT_PURCHASABLE`, with the first reason that applies, in this order:
+     `NOT_FOUND` (catalog does not know the product), `OWN_PRODUCT` (the product
+     belongs to the merchant linked to the buyer's account: a merchant cannot
+     buy from itself), `INACTIVE` (the product is deactivated),
+     `MERCHANT_INACTIVE` (catalog's `merchantActive` **or** merchant-service's
+     live `active` is false, or merchant-service does not know the merchant),
+     `STOCK_ROW_UNAVAILABLE` (`stockRow` is `CONFLICT` or `REJECTED`). A
+     `PENDING` stock row is not refused: its reservation fails with
+     `UNKNOWN_PRODUCT`. Stock itself is not checked here; the reservation
+     decides it.
+   - **The price.** The server's total (below) must equal the body's
+     `expectedTotal` (numerically, so `13.5` equals `13.50`), else 409
+     `PRICE_CHANGED` with every line's current price and the current total.
+     FR-B12: the buyer is never charged a total that was not shown.
+6. **One transaction**: the order (`PENDING`), its charge legs and lines (all
+   `REQUESTED`), and one outbox row per request: a charge per merchant, a
+   reserve per line. Then 202 (Section 3); the relay publishes the requests.
+
+A checkout refused at step 5 (400, 403, 409 or 503) stores nothing, so a retry
+with the same Idempotency-Key runs again from step 1. Two concurrent first
+requests with one key both run step 5; the second insert fails on the unique
+`(buyerAccountId, idempotencyKey)`, and a **new** transaction answers from the
+winner's order (200, or 409 if the fingerprint differs), as in payment-service.
+
+**The fingerprint** is HMAC-SHA256 under `BASKETRY_ORDER_FINGERPRINT_KEY` of a
+canonical form of the body: the lines sorted by `productId`, the coupon code,
+the card number and `expectedTotal` at scale 2. It is keyed because a plain
+hash of a card number could be reversed by trying every number. The key has
+the internal key's rules: whitespace stripped, fewer than 32 characters fails
+startup, unset means a WARN at startup and every checkout refused (step 3).
+Changing the key makes the replay of an earlier request a 409.
+
+**Amounts.** `lineAmount = unitPrice × quantity`, exact. A merchant's
+`subtotal` is the sum of its lines, `amount = subtotal − discount` (the
+discount is 0.00 until promotion-service exists), and `totalAmount` is the sum
+of the merchant amounts, so **the merchant charges always sum to the order
+total** (tested). The worst case fits every column: 100 lines × 1,000 units ×
+99,999.99 = 9,999,999,000.00, below payment-service's maximum amount and
+`NUMERIC(12, 2)`'s 9,999,999,999.99.
+
+**Commission** (REQUIREMENTS Section 8): per merchant,
+`commission = amount × commissionRate / 100`, rounded HALF_UP to scale 2, on
+the amount actually charged (the subtotal after the discount; equal to the
+subtotal while coupons are refused). `commissionRate` is merchant-service's
+rate at checkout, snapshotted on the leg, so a later change of the rate never
+alters an earlier order. It is recognised only on a `SUCCEEDED` order: it is
+published in `order.succeeded` (Section 5) and nowhere else.
+
+**Coupons.** promotion-service does not exist yet, so a `couponCode` with a
+value is a 400 `COUPONS_NOT_SUPPORTED`. The check sits behind a
+`CouponValidator` interface that promotion-service's client will implement. A
+merchant whose net comes to zero will then get no charge leg (Section 2,
+promotion-service), so the coordinator never assumes every merchant has one.
+
+**Order status:**
+
+| Status | Meaning | Final |
+|---|---|---|
+| `PENDING` | Results outstanding, none negative | no |
+| `SUCCEEDED` | Every charge leg `CHARGED` and every line `RESERVED` | yes |
+| `FAILING` | Failure decided; compensations or results still outstanding | no |
+| `FAILED` | Failure decided and every leg settled (below) | yes, unless reopened |
+
+`FAILING` is not a partial success: the all-or-nothing decision is already
+made, and the buyer sees that the order failed and is being reversed (there
+is still no `PARTIALLY_PAID`, REQUIREMENTS Section 10). A leg is **settled**
+when it can never need a compensation again: a charge leg `DECLINED`,
+`REFUNDED` or `TIMED_OUT`, a line `FAILED` or `RELEASED`. `needsAttention` is
+true exactly while a leg is `STUCK`, which keeps the order `FAILING`.
+
+**Who decides.** Results of one order arrive on six listener threads (one per
+result topic), and the timer runs on another. Every one of them, in its own
+transaction, first **locks the order row** (`SELECT ... FOR UPDATE`, waiting at
+most 5 s, then a database error that the listener retries), then changes the
+leg, then decides. So the results of one order are handled one at a time, and
+different orders in parallel. Without the lock, two results committing
+together would each see the other's leg as still open under READ COMMITTED,
+neither would decide, and a healthy order would wait for the deadline and
+fail. A test places exactly this race on PostgreSQL (postgresTest); H2 alone
+does not prove it.
+
+**The decision**, made in the transaction that changed a leg:
+- `PENDING`, and every leg positive (`CHARGED`, `RESERVED`): `SUCCEEDED`, with
+  an `order.succeeded` outbox row.
+- `PENDING`, and a leg negative (`DECLINED`, a line `FAILED`, or `TIMED_OUT`):
+  `FAILING`. In the same transaction every `CHARGED` leg becomes
+  `REFUND_REQUESTED` and every `RESERVED` line `RELEASE_REQUESTED`, each with a
+  request in the outbox. Legs still `REQUESTED` keep waiting for their result
+  or the deadline.
+- `FAILING`, and every leg settled: `FAILED`, with an `order.failed` outbox row.
+
+**Results, by leg state.** Every result is matched to its leg by
+`(orderId, merchantId)` or `(orderId, productId)`. A result for an order or a
+leg order-service does not have (data loss, such as an H2 restart) is logged
+as a WARN and skipped. "Drop" means: nothing changes, the offset is committed.
+
+| Result | Leg is `REQUESTED` | Leg is `TIMED_OUT` | Any other state |
+|---|---|---|---|
+| `charged` | `CHARGED`, ref stored; if the order is `FAILING`, `REFUND_REQUESTED` at once | `REFUND_REQUESTED`, ref stored; a `FAILED` order is reopened (below) | drop (a repeat, or payment's re-publish after a refund) |
+| `declined` | `DECLINED`, code stored | drop | drop |
+| `refunded` | — | — | `REFUND_REQUESTED` or `STUCK`: `REFUNDED`; otherwise drop |
+| `reserved` | `RESERVED`; if the order is `FAILING`, `RELEASE_REQUESTED` at once | drop (its release is already requested) | drop (a repeat, or inventory's re-publish after a release) |
+| `reservation-failed` | `FAILED`, code stored | drop (the release is still answered) | drop |
+| `released` | — | `RELEASED` | `RELEASE_REQUESTED` or `STUCK`: `RELEASED`; otherwise drop |
+
+"—" cannot happen (no request was ever sent that it answers); it is logged as
+a WARN and dropped.
+
+This **replaces the earlier rule** that any result for an order in a final
+state is a no-op: since the timer can give up on a leg, a final state no longer
+means every result has arrived. A late `charged` is money taken, so it is
+always refunded (refunds are idempotent by `transactionRef`). A late
+`reserved` takes nothing: the release sent at the deadline either gave it back
+or left a tombstone that made it fail (Section 2, inventory-service). After
+each change the decision above runs again; a `STUCK` leg that settles clears
+`needsAttention` if no other leg is `STUCK`.
+
+**Reopen.** A late `charged` on a `FAILED` order moves it back to `FAILING`
+(`completedAt` reset) until that refund confirms. Then it is `FAILED` again and
+**publishes `order.failed` again**, a new outbox row with a new `eventId` and
+the order's reasons as they stand. A consumer of `order.failed` must expect
+more than one per order. An order can never move out of `SUCCEEDED`: every
+charge leg is then `CHARGED`, and no result changes a `CHARGED` leg.
+
+**The timer** runs every 5 s (fixed delay). Each pass takes up to 100 orders
+with something due, and handles each in its own transaction under the order's
+row lock:
+- **The deadline.** An order still `PENDING` or `FAILING` with a leg
+  `REQUESTED` after `deadlineAt` (2 min after checkout): every `REQUESTED` leg
+  becomes `TIMED_OUT` (`reasonCode` `NO_RESULT`). A `PENDING` order becomes
+  `FAILING`, with the compensations of the decision above. A timed-out charge
+  leg has no `transactionRef`, so nothing can be refunded; if its charge
+  arrives later, it is refunded then. **A timed-out line always gets a
+  release**, whether its reserve was sent or not, so a reserve arriving later
+  takes nothing.
+- **Unsent requests.** In the same transaction, every outbox row of the order
+  still `PENDING` on a request topic (a charge or a reserve) becomes
+  `CANCELLED`, and its card number is removed. Otherwise a Kafka outage longer
+  than the deadline would charge buyers for orders that already failed. A row
+  the relay is sending at that moment can still reach the broker; its result
+  is a late one, handled above.
+- **Compensations.** A refund or release not confirmed 1 min after it was
+  requested is sent again (a new outbox row, the same request: the refund by
+  its `transactionRef`, the release with the line's quantity), at most 3
+  times, 1 min apart. This covers every leg waiting for a compensation: a
+  charge leg `REFUND_REQUESTED`, and a line `RELEASE_REQUESTED` **or
+  `TIMED_OUT`** (whose release was requested at the deadline), with exactly the
+  same resends. 1 min after the third resend the leg becomes `STUCK` and
+  the order `needsAttention`. A `STUCK` leg is not resent; its late
+  confirmation still settles it. Admin finds these orders through
+  `GET /orders?needsAttention=true` (Section 3) and repairs the cause, usually
+  a request in payment-service's or inventory-service's dead-letter topic that
+  can be replayed by hand (Section 5).
+- **Startup grace.** For 60 s after the service starts, the timer does nothing,
+  so an order whose results are still queued in Kafka after a restart is not
+  failed before the listeners have read them. The listeners run from the start.
+- Settings: `basketry.order.saga-deadline` (2 min), `basketry.order.timer-interval`
+  (5 s), `basketry.order.startup-grace` (60 s),
+  `basketry.order.compensation.resend-interval` (1 min) and
+  `basketry.order.compensation.max-resends` (3).
+- **Two instances** are safe: the order's row lock decides who acts, and every
+  change is conditional on the leg's state.
+
+**The card number** is used only to build the charge requests. Its copies:
+- the checkout request, in memory only. The request object masks it in
+  `toString`, and **no access log or request logging ever records the checkout
+  body** (no payload logging filter, Tomcat's access log never configured with
+  the body). A 400 never quotes a value, and the error handler never passes a
+  Jackson message through (it can quote the number);
+- the charge request's outbox row, until it is `SENT` or `CANCELLED`. The same
+  update that marks it replaces `cardNumber` in the payload with `null`, so a
+  replay of the stored payload by hand is dead-lettered by payment-service,
+  never charged;
+- the request topic and payment-service's dead-letter topic (Section 5), for
+  the topic's retention of 7 days;
+- PostgreSQL's write-ahead log and the old row version, until they are
+  recycled and vacuumed, and any backup taken meanwhile. Accepted for this
+  mock; a real system sends a token (Section 3).
+
+The fingerprint holds it only inside a keyed HMAC. A test sends a sentinel
+number down every path (checkout, replay, 400s, relay, cancel, every log at
+DEBUG) and checks every log line and every stored value.
+
+**orderId and H2.** `orderId` is payment-service's and inventory-service's
+idempotency key. If order-service restarts on H2 while they keep their data,
+its ids begin at 1 again, and a new order 7 gets the stored answer of the old
+order 7. Restart everything together on H2 (Section 7).
 
 ### promotion-service
 ```
@@ -876,7 +1113,7 @@ shape for review.
 
 **merchant-service**
 
-Every endpoint needs a bearer JWT from identity-service. Tokens are verified
+Every endpoint except `/internal/**` (below) needs a bearer JWT from identity-service. Tokens are verified
 with the keys at identity-service's `GET /.well-known/jwks.json` (Section 2,
 Tokens).
 - The JWKS is fetched on first use, not at startup, so the two services
@@ -987,6 +1224,23 @@ to tell apart carries a `code` property.
   - The `PATCH` reads the merchant with a row lock (Section 2) and waits at
     most 5 s for another request's lock. Then it answers 503 `MERCHANT_BUSY`
     and applies nothing; the client can retry.
+- `GET /internal/merchants?ids=1,2,3` (internal key; for order-service's
+  checkout, Section 2, order-service). 1 to 100 positive ids, else 400; the
+  limit counts repeated ids, and `1,,2` is a 400 (as catalog-service's
+  `/internal/products`). Response `{content: [...]}` in id order, a repeated id
+  answered once, unknown ids left out. Each item `id`, `active` and
+  `commissionRate`, the rate as a JSON number keeping its scale (`5.00`, never
+  `5.0`). A plain read, no row lock: the answer is the state at that moment,
+  and order-service snapshots the rate. A `PENDING` merchant is answered like
+  any other.
+- **`/internal/**`** follows identity-service's rules exactly (Section 3,
+  identity-service): its own security chain, the shared key in
+  `X-Internal-Api-Key` only (never a JWT), compared in constant time, no CORS
+  headers, and the same bare 401 for a missing key, a wrong key or a user JWT.
+  It uses the key merchant-service already reads to call identity-service
+  (`BASKETRY_INTERNAL_API_KEY`, same rules); unset means a WARN at startup, as
+  now, and every internal call refused as well as onboarding. The Ingress must
+  never route it externally.
 
 **Calling identity-service.** merchant-service uses Spring `RestClient` on
 the JDK HttpClient.
@@ -1090,9 +1344,10 @@ POST and PATCH, no credentials). Product fields and their rules: Section 2.
   `merchantActive`, and `stockRow` is neither `CONFLICT` nor `REJECTED` (a
   `PENDING` one fails at reservation with `UNKNOWN_PRODUCT`). `merchantActive`
   is catalog-service's local copy: true for a merchant that never changed
-  status, and it lags `merchant.status.changed` by seconds. No merchant code
-  and no commission rate (merchant-service's; Section 6). Provisional until
-  order-service is built.
+  status, and it lags `merchant.status.changed` by seconds, so order-service
+  also asks merchant-service for the live status. No merchant code and no
+  commission rate: order-service reads the rate from merchant-service's
+  `GET /internal/merchants` (Section 3, merchant-service).
 
 **inventory-service**
 
@@ -1157,12 +1412,96 @@ one global Jackson setting, as in identity-service. CORS allows
   actuator endpoint is exposed.
 
 **order-service**
-- `POST /orders/checkout` — starts the saga (see Section 4). The body
-  carries the whole client-side cart (`productId`, `quantity` per line),
-  an optional `couponCode`, and `cardNumber`. *(A real system would send
-  a tokenized payment-method reference, never a raw card number.)*
-- `GET /orders?buyerAccountId=` / `?merchantId=`
-- `GET /orders/{reference}`
+
+Bearer tokens are verified exactly as in merchant-service (identity-service's
+JWKS at `BASKETRY_IDENTITY_URL`, fetched on first use, cached, 2 s / 5 s
+timeouts, 503 when a token's key is not cached and the JWKS cannot be fetched,
+401 for a malformed, expired, tampered or unpublished-key token or none).
+Request validation runs before the capability check: an invalid request is a
+400 for anyone, never a 403. Every error is a problem detail, and a 403, 409
+or 503 a client may need to tell apart carries a `code`. A field takes only
+its own JSON type, as everywhere (`"3"` for a number, `1.5` for a whole number,
+`5` for a string are 400s, never converted); any field not listed is a 400
+naming it. CORS allows `basketry.cors.allowed-origins` (GET and POST, the
+headers `Authorization`, `Content-Type` and `Idempotency-Key`, `Location`
+exposed, no credentials). There is no `/internal/**` endpoint yet.
+`GET /actuator/health` (and its probe groups) needs no token, shows no details
+and includes no other service.
+
+- `POST /orders/checkout` (a token with `BUYER`; FR-B7 to FR-B12). Starts the
+  saga; the steps and their order are in Section 2, order-service.
+  - **Header `Idempotency-Key`**, required: 8 to 64 characters of
+    `[A-Za-z0-9_-]`, else 400.
+  - **Body:**
+    ```json
+    {"lines":[{"productId":42,"quantity":3}], "couponCode":null,
+     "cardNumber":"4000000000000002", "expectedTotal":13.50}
+    ```
+    `lines`: 1 to 100, each `productId` a positive whole number and `quantity`
+    a whole number from 1 to 1,000 (inventory-service's limit); a repeated
+    `productId` is a 400. `couponCode`: absent or `null`; a value is a 400
+    `COUPONS_NOT_SUPPORTED` until promotion-service exists. `cardNumber`: a
+    string of 12 to 19 ASCII digits (payment-service's rule, so a valid
+    checkout never sends a request it would dead-letter). `expectedTotal`: the
+    total the buyer was shown, a JSON number above 0 with at most 2 decimal
+    places, at most 9,999,999,999.99. No 400 ever quotes the card number.
+    *(A real system would send a tokenized payment-method reference, never a
+    raw card number.)*
+  - **202** with `Location: /orders/{reference}` and the order (below), in
+    `PENDING`, for the first request. The saga runs after the answer; the Buyer
+    app polls `GET /orders/{reference}`.
+  - **200** with the same `Location` and the order **as it stands now** for a
+    replay: the same key and the same body.
+  - 403: no `BUYER` capability; `BUYER_DEACTIVATED`; `BUYER_NOT_FOUND`.
+  - 409: `IDEMPOTENCY_KEY_REUSED` (same key, another body);
+    `CART_NOT_PURCHASABLE` with `lines: [{productId, reason}]` for every refused
+    line (`NOT_FOUND`, `OWN_PRODUCT`, `INACTIVE`, `MERCHANT_INACTIVE`,
+    `STOCK_ROW_UNAVAILABLE`); `PRICE_CHANGED` with `lines: [{productId,
+    unitPrice}]` and `total`, the current ones.
+  - 503, nothing created: `IDENTITY_UNAVAILABLE`, `CATALOG_UNAVAILABLE`,
+    `MERCHANT_UNAVAILABLE` (a timeout, connection failure, 5xx, or a 401
+    meaning the API keys differ, logged as an ERROR); connect 2 s, read 5 s, no
+    retry inside the request: the client retries with the same key.
+    `INTERNAL_API_KEY_NOT_CONFIGURED`, `FINGERPRINT_KEY_NOT_CONFIGURED`.
+- `GET /orders/{reference}`. The buyer who placed it, a merchant with a line in
+  it (a token with `MERCHANT`; its `merchantId` claim), or Admin. A reference
+  not of the form `ORD-` + 20 base32 characters is a 400. **A non-admin gets
+  404 both for an order that does not exist and for one that is not theirs**,
+  so it learns nothing about other orders; Admin gets 404 only for one that
+  does not exist.
+- `GET /orders`. The same readers; paging as `GET /accounts` (`page` from 0,
+  `size` 1..100, anything out of range a 400, a page past the end 200 with empty
+  `content`), **newest first** (id descending). Every merchant token also has
+  `BUYER`, so a non-admin chooses the view with `view`: `buyer` (the default)
+  lists its own purchases, `merchant` (needs `MERCHANT`, else 403) the orders
+  with at least one of its lines. Admin gets every order, optionally only
+  `needsAttention=true`; `needsAttention` from anyone else, and `view` from
+  Admin, is a 403. Which orders a reader gets always comes from the token,
+  never from an id in a parameter. A deactivated merchant's new tokens have no
+  `MERCHANT` and no `merchantId`, so `view=merchant` is a 403 for it (and
+  `GET /orders/{reference}` a 404 for its orders) until it is reactivated; a
+  token issued before the deactivation keeps working until it expires
+  (Section 2, Tokens).
+- For `GET /orders/{reference}` the view follows from the order: its buyer gets
+  the buyer view, a merchant with a line in it the merchant view. One account
+  is never both for one order: a merchant cannot buy its own products
+  (`OWN_PRODUCT`), and an account is linked only once, to a merchant that is
+  then new and has no products, so an order placed before the link has no line
+  of that merchant.
+- **What each reader sees.** Every money value as a JSON number keeping scale
+  2.
+  - Buyer: `reference`, `status`, `totalAmount`, `couponCode`, `createdAt`,
+    `merchants: [{merchantId, amount, status, reasonCode}]` and
+    `lines: [{productId, merchantId, productName, unitPrice, quantity,
+    lineAmount, status, reasonCode}]`. No commission, no `transactionRef`, no
+    `needsAttention`.
+  - Merchant: `reference`, `status`, `buyerAccountId` (**never an email**),
+    `createdAt`, its own charge leg only (`subtotal`, `discount`, `amount`,
+    `commissionRate`, `commission`, `status`, `reasonCode`, `transactionRef`)
+    and its own lines only. Not the order total, not another merchant's lines
+    or leg (FR-M3, FR-M8, FR-M9).
+  - Admin: everything the buyer sees, plus `buyerAccountId`, `needsAttention`
+    and every leg's commission fields and `transactionRef`.
 
 **payment-service**
 - No REST endpoints for the front-ends. Its interface is the Kafka topics
@@ -1190,12 +1529,19 @@ one global Jackson setting, as in identity-service. CORS allows
 See `checkout-saga.mermaid` for the full diagram. Summary:
 
 **Happy path:**
-1. Buyer → `order-service`: `POST /orders/checkout`
+1. Buyer → `order-service`: `POST /orders/checkout`, with an
+   `Idempotency-Key`
 2. `order-service` → `identity-service`: confirm the buyer is still
    active (sync, live check — FR-A6; a deactivated buyer is rejected
-   before anything else happens), then `order-service` →
-   `promotion-service`: validate coupon (sync, if present)
-3. `order-service` creates `Order` in `PENDING`, then publishes, in
+   before anything else happens), then `catalog-service` and
+   `merchant-service`: re-validate every line and read each merchant's live
+   status and commission rate (sync), then `order-service` →
+   `promotion-service`: validate coupon (sync, if present; until
+   promotion-service exists a coupon is refused with a 400). Any refusal or
+   unavailable service answers at once and creates nothing.
+3. `order-service` creates `Order` in `PENDING`, with its legs and one outbox
+   row per request, in one transaction, and answers **202** with the order's
+   `Location`; the Buyer app polls it. The relay then publishes, in
    parallel: one `MerchantChargeRequested` event per merchant whose net
    amount owed is above zero (a merchant whose net is zero after the
    coupon gets no payment leg — Section 2, promotion-service), **and**
@@ -1210,6 +1556,8 @@ See `checkout-saga.mermaid` for the full diagram. Summary:
 6. `order-service` waits for a result for **every** merchant charge it
    requested and **every** stock reservation in the order — not just one
    or the other.
+   Each result is applied under the order's row lock, so only one result
+   of an order decides (Section 2, order-service).
    If **all** are positive (`MerchantCharged` + `StockReserved`): sets
    `Order.status = SUCCEEDED`, publishes `OrderSucceeded`
 7. `promotion-service` and `platform-service` consume `OrderSucceeded`
@@ -1220,20 +1568,22 @@ See `checkout-saga.mermaid` for the full diagram. Summary:
 **Decline path (compensating refund + stock release):**
 1. Same as above through step 6
 2. `order-service` sees at least one `MerchantDeclined` or
-   `StockReservationFailed`
+   `StockReservationFailed`, and sets `Order.status = FAILING`: the failure is
+   decided, the compensations are outstanding
 3. For every merchant that already returned `MerchantCharged`,
    `order-service` publishes `MerchantRefundRequested`. For every product
    that already returned `StockReserved`, it publishes
    `StockReleaseRequested` — both compensating actions fire together,
-   not sequentially, since they're independent of each other
+   not sequentially, since they're independent of each other. A leg that
+   answers positively after this point is compensated as soon as it answers
 4. `payment-service` consumes refund requests and confirms
    `MerchantRefunded`; `inventory-service` consumes release requests,
    marks the `StockReservation` row `RELEASED` and increments `stock_level`
    in one Postgres transaction (the row is kept, so a repeated release, or a
    reserve replayed after it, changes nothing; Section 2), then increments the
    Redis counter back and confirms `StockReleased`
-5. Once **all** outstanding compensations (refunds and releases) are
-   confirmed, `order-service` sets `Order.status = FAILED`, publishes
+5. Once **every** leg is settled (every result in, every refund and release
+   confirmed), `order-service` sets `Order.status = FAILED`, publishes
    `OrderFailed`
 6. No consumer of `OrderFailed` needs to do anything further (no coupon
    consumption, no platform projection) — the compensations in steps 3–4
@@ -1241,6 +1591,27 @@ See `checkout-saga.mermaid` for the full diagram. Summary:
    precisely why the all-or-nothing decision keeps the failure path
    conceptually simple even though it now has two kinds of compensation
    (refund and release) instead of one
+
+**Stuck path (a result never arrives).** Every order has a deadline, 2 min
+after checkout. A timer (Section 2, order-service) then counts every leg
+still without a result as failed (`TIMED_OUT`), fails a `PENDING` order
+(`FAILING`), sends a release for every line without a result (sent or not,
+so a late reserve takes nothing), a refund for every charged merchant, and
+cancels the order's requests still unsent in the outbox. A refund or release
+that is not confirmed is sent again 3 times, 1 min apart; then its leg is
+`STUCK`, the order stays `FAILING` with `needsAttention`, and Admin sees it.
+The usual cause is a request in payment-service's or inventory-service's
+dead-letter topic, which neither service answers; it is fixed and replayed by
+hand. payment-service and inventory-service are unchanged. After a restart,
+the timer waits 60 s before acting, so results still queued in Kafka are read
+first.
+
+**Late path (a result after the decision).** A late `MerchantCharged` is money
+taken, so it is always refunded, even on a `FAILED` order, which goes back to
+`FAILING` until the refund confirms and then publishes `OrderFailed` again. A
+late `StockReserved` needs nothing: the release sent at the deadline gave it
+back or made it fail. Every other late or repeated result is dropped. The full
+table is in Section 2, order-service.
 
 **Design note:** treating stock reservation as a full saga leg (with its
 own compensating action) rather than a simple "decrement on success" is
@@ -1265,8 +1636,16 @@ overselling race window this design exists to close.
 | `order.stock.reservation-failed` | inventory-service | order-service | schemaVersion, eventId, orderId, productId, reasonCode, occurredAt |
 | `order.stock-release.requested` | order-service | inventory-service | schemaVersion, orderId, productId, quantity |
 | `order.stock.released` | inventory-service | order-service | schemaVersion, eventId, orderId, productId, occurredAt |
-| `order.succeeded` | order-service | promotion-service, platform-service | orderId, items[], couponCode |
-| `order.failed` | order-service | *(none currently — reserved for future audit/notification use)* | orderId, reasonCode |
+| `order.succeeded` | order-service | promotion-service, platform-service | schemaVersion, eventId, orderId, orderReference, buyerAccountId, couponCode, totalAmount, merchants[] (with commission), items[], occurredAt |
+| `order.failed` | order-service | *(none currently — reserved for future audit/notification use)* | schemaVersion, eventId, orderId, orderReference, reasons[], occurredAt; can repeat for one order (a reopen) |
+
+Every `order.*` topic has 3 partitions, replication factor 1 and default
+retention (7 days), and is keyed by the `orderId` as a string, so one order's
+events stay in order within a topic (never across topics). The topics each
+service publishes are created by that service on its first publish; the
+broker does not auto-create topics. So order-service creates the four request
+topics and `order.succeeded` and `order.failed`; payment-service and
+inventory-service create their result topics.
 
 Note `inventory-service` is no longer a consumer of `order.succeeded` —
 stock was already committed at reservation time (Section 2), so there's
@@ -1463,12 +1842,14 @@ payment-service; the requests that cause them are below):
   order across topics**: `charged` and `refunded` are different topics, so
   order-service can see a re-published `charged` after the `refunded` of the same
   charge.
-- **order-service must treat a `charged` or `refunded` result for an order
-  already in a final state (`SUCCEEDED` or `FAILED`) as a no-op.** That is safe:
-  order-service reaches a final state only once it has a result for every charge
-  (Section 4), so a later result is always a repeat. A repeated result for an
-  order still `PENDING` is dropped by `(orderId, merchantId)`, as for every
-  `order.*` event below.
+- **order-service handles each result by the state of its leg**, matched by
+  `(orderId, merchantId)`, not by the order's status (the table in Section 2,
+  order-service). A repeat, and a re-published `charged` after the `refunded`
+  of the same charge, is dropped. **A `charged` for a leg that timed out is
+  refunded, even on a `FAILED` order**, which is reopened: the timer can give
+  up on a leg (Section 4, stuck path), so a final state no longer means every
+  result has arrived. This replaces the earlier rule that any result for an
+  order in a final state is a no-op.
 - **Value:** JSON, like `merchant.status.changed`, built once and stored in the
   outbox row:
   ```json
@@ -1561,7 +1942,10 @@ payment-service; the requests that cause them are below):
   owned by payment-service and created on first use. No retry topics, which would
   copy the record again. Nothing consumes them: replaying one by hand after a fix
   is safe, because requests are idempotent (Section 2). **A refund sent to a
-  dead-letter topic gets no reply**, so the order stays `PENDING` (Section 6).
+  dead-letter topic gets no reply**: order-service sends it again 3 times, then
+  marks the leg `STUCK` and the order `needsAttention` (Section 2,
+  order-service); replaying the fixed record confirms it. A charge sent to a
+  dead-letter topic is timed out by order-service's deadline.
 - **The card number in the dead-letter topic.** The dead letter keeps the
   original value byte for byte: a masked number would replay as "any other
   number" and be approved, so the dead-letter topic is exposed exactly as much as
@@ -1603,9 +1987,11 @@ no transaction open during a send. Only the differences:
   `reserved` or `reservation-failed` (with its one code) for good, a `RELEASED`
   row still answers `reserved`, and a release is always `released`. There is no
   order across topics, so order-service can see a re-published `reserved` after
-  the `released` of the same line, and must treat it as payment's `charged`
-  after a refund: a no-op for an order in a final state, dropped by
-  `(orderId, productId)` for one still `PENDING`.
+  the `released` of the same line, and drops it, as payment's `charged` after a
+  refund. order-service handles each result by the state of its leg, matched by
+  `(orderId, productId)` (Section 2, order-service); a late `reserved` for a
+  line that timed out needs nothing, because the release sent at the deadline
+  gave it back or left a tombstone.
 - **Two timers, two threads.** The relay and the counter reconciliation
   (Section 2) share the service's scheduler, which gets 2 threads
   (`spring.task.scheduling.pool.size`): with Spring's default of 1, a long
@@ -1660,8 +2046,11 @@ differences:
   outcome: a reserve over the limit, of an unknown product, without enough
   stock, or after its release (`reservation-failed`), and a release with no
   reservation (a tombstone, then `released`). So the dead-letter topics are the
-  only requests that get no reply, and **an order whose reserve or release was
-  dead-lettered stays `PENDING`** (Section 6).
+  only requests that get no reply. **order-service times out a dead-lettered
+  reserve at its deadline** (and sends its release), **and sends a
+  dead-lettered release again 3 times, then marks the line `STUCK`** and the
+  order `needsAttention` (Section 2, order-service); until the record is fixed
+  and replayed, the stock it should give back stays taken.
 - **Dead-letter topics:** `order.stock-reserve.requested.DLT` and
   `order.stock-release.requested.DLT`, 3 partitions, keyed like the original,
   owned by inventory-service and created on first use. Replaying one by hand
@@ -1672,6 +2061,109 @@ differences:
 - **Switches:** `basketry.stock-requests.consumer.enabled` and
   `basketry.outbox.relay.enabled`, both off in tests, which call `StockService`
   and the relay directly unless a test class turns them on.
+
+**order-service requests** (`order.merchant-charge.requested`,
+`order.merchant-refund.requested`, `order.stock-reserve.requested`,
+`order.stock-release.requested`):
+- **Transactional outbox** in order-service's own `outbox_event` table (Section
+  2, order-service). The checkout transaction writes the charges and reserves;
+  the transaction that changes a leg, a result's or the timer's, writes the
+  refunds, releases, `order.succeeded` and `order.failed` it decides.
+- **The relay** works as payment-service's (every second, up to 100 `PENDING`
+  rows in `id` order, a failure stops the pass, waits of 1, 2, 4 … up to 60 s,
+  `SENT` rows kept, no transaction open during a send, the same producer
+  settings, each row to the topic it names with its `messageKey`). It declares
+  six topics, all created together on its first publish and checked again
+  after any failure: the four request topics, `order.succeeded` and
+  `order.failed`. Only the differences:
+  - **`CANCELLED`.** The timer cancels an order's unsent requests (Section 2,
+    order-service). The relay's `SENT` mark and the cancel each move only a
+    `PENDING` row, so exactly one of them wins, and whichever wins removes the
+    card number in the same update. The relay never sends a `CANCELLED` row;
+    a row it was already sending can still arrive, and its result is a late one.
+  - **Ids follow insert order, not commit order, and that is harmless here**:
+    within one order every compensation is written only after the request it
+    compensates was committed (a refund after its `charged`, a release after
+    its `reserved` or after the deadline), and a release that overtakes its
+    reserve across topics leaves a tombstone (Section 2, inventory-service).
+- **Values:** exactly the fields payment-service's and inventory-service's
+  parsers accept (above), with `schemaVersion` 1, a new `eventId` per row and
+  `occurredAt`. A charge's `amount` is the leg's amount, a JSON number at scale
+  2; a refund carries the leg's `transactionRef`; a reserve and a release carry
+  the line's `quantity`. A resend of a refund or release is a new row with a new
+  `eventId` and the same content. **A charge is never resent**: the outbox
+  already delivers it at least once, and a charge with no answer is timed out.
+  Golden JSON files of every request are checked in order-service's tests, and
+  the end-to-end check proves the real parsers accept them.
+- **The card number** is on the charge topic and, for a malformed request,
+  payment-service's dead-letter topic, for 7 days (the topic's retention); in
+  order-service only until the row is `SENT` or `CANCELLED` (Section 2,
+  order-service). Never run `org.apache.kafka.clients` or
+  `org.springframework.kafka.core.DefaultKafkaProducerFactory` at TRACE in
+  order-service either.
+
+**order-service results** (the six result topics of payment-service and
+inventory-service):
+- **Settings** as payment-service's listeners: group id `order-service`, one
+  listener and one thread per topic, `auto.offset.reset=earliest`, the
+  container committing after each record, `metadata.max.age.ms` 10 s,
+  `max.poll.records` 50 (a record may wait 5 s for an order's row lock), Kafka
+  not needed to start, and the topics, which belong to their producers, never
+  created here.
+- **The listeners only parse the record and call the saga service, and never
+  run inside a transaction**; the saga service opens its own, with the order's
+  row lock (Section 2, order-service).
+- **Parsing** follows catalog-service's consumer: on the JSON tree, by hand,
+  `schemaVersion` checked first and only `1`, ids positive whole JSON numbers
+  that fit 64 bits, `transactionRef` a string in payment-service's format,
+  `reasonCode` a string of 1 to 40 characters, a repeated field or anything
+  after the object refused, unknown fields ignored. The Kafka key is not
+  checked.
+- **A result that cannot be applied:**
+
+  | Case | Action |
+  |---|---|
+  | No value, malformed JSON, a missing, repeated or wrongly typed field | Dead-letter topic, then the next record |
+  | Unknown `schemaVersion` | Dead-letter topic, then the next record |
+  | No such order or leg (data loss) | WARN, skipped, offset committed |
+  | Any unexpected exception | Dead-letter topic, then the next record |
+  | Database error, a lock timeout included (anywhere in the cause chain) | Retry with no limit, seeking back, waiting 1, 2, 4 … up to 60 s; the offset is not committed |
+
+  A dead-lettered result leaves its leg as if it never arrived, so the
+  deadline or the compensation resends deal with it: nothing waits for ever.
+- **Dead-letter topics:** `<result topic>.order-service.DLT` (six), 3
+  partitions, keyed like the original, owned by order-service and created on
+  first use, with only our two exception headers, never quoting a value (as
+  inventory-service's). Replaying one by hand is safe: results are handled by
+  leg state.
+- **Switches:** `basketry.order-results.consumer.enabled`,
+  `basketry.outbox.relay.enabled` and `basketry.order.timer.enabled`, all off
+  in tests, which call the services directly unless a test class turns them on.
+
+**`order.succeeded`** (one per order, written in the transaction that decides
+`SUCCEEDED`; platform-service and promotion-service will need nothing else):
+```json
+{"schemaVersion":1, "eventId":"<uuid>", "orderId":7, "orderReference":"ORD-<20 base32>",
+ "buyerAccountId":12, "couponCode":null, "totalAmount":25.50,
+ "merchants":[{"merchantId":3, "subtotal":25.50, "discount":0.00, "amount":25.50,
+               "commissionRate":5.00, "commission":1.28, "transactionRef":"TXN-<32 hex>"}],
+ "items":[{"productId":42, "merchantId":3, "quantity":3, "unitPrice":8.50, "lineAmount":25.50}],
+ "occurredAt":"2026-11-13T10:00:00Z"}
+```
+`merchants` lists one entry per charge leg; every money value is a JSON number
+at scale 2.
+
+**`order.failed`** (written in the transaction that makes the order `FAILED`;
+again after a reopen, with a new `eventId`):
+```json
+{"schemaVersion":1, "eventId":"<uuid>", "orderId":7, "orderReference":"ORD-<20 base32>",
+ "reasons":[{"leg":"CHARGE", "merchantId":3, "reasonCode":"51"},
+            {"leg":"RESERVE", "productId":42, "reasonCode":"INSUFFICIENT_STOCK"}],
+ "occurredAt":"2026-11-13T10:00:00Z"}
+```
+`reasons` lists every leg that failed: a declined charge (its response code),
+a failed reservation (its reason code) and a leg that timed out (`NO_RESULT`).
+Neither event carries any part of the card number.
 
 The `order.*` events carry the `orderId` (and `merchantId`/`productId` where
 relevant) as a natural idempotency key — consumers must treat redelivery
@@ -1684,24 +2176,31 @@ at-least-once delivery means duplicates are expected, not exceptional.
 - **Decided** (was open): payment-service's idempotency key is a unique
   `(orderId, merchantId)` on its transaction row, with no dedupe table; a refund
   is keyed by `transactionRef` (Section 2, payment-service).
-- order-service has no stuck-saga handling yet: nothing happens when a charge,
-  reservation or refund result never arrives. In particular, **a refund that
-  payment-service sends to its dead-letter topic** (unknown reference, a
-  `DECLINED` transaction, another order's or merchant's reference) **gets no
-  reply, and the order stays `PENDING` until order-service has stuck-saga
-  handling**. The same holds for **a reserve or release that inventory-service
-  sends to its dead-letter topic** (a malformed record, Section 5): no reply,
-  and for a dead-lettered release, the stock it should give back stays taken
-  until the record is fixed and replayed by hand. Decide before writing
-  order-service's saga coordinator.
-- Whether `order-service` needs its own outbox table to guarantee
-  `MerchantChargeRequested` is published exactly once per DB commit
-  (transactional outbox pattern) — worth doing properly rather than
-  skipping, since it's a genuinely common real-world gap; decide before
-  writing `order-service`'s checkout handler.
-- `order-service` needs the commission rate in force at order time, and
-  nothing provides it yet. `merchant-service` holds only the current rate,
-  so a rate changed later must not alter the commission of an earlier order.
+- **Decided** (was open): stuck sagas. Every order has a deadline (2 min); the
+  timer then counts every unanswered leg as failed, sends a release for every
+  line without a result and a refund for every charged merchant, resends an
+  unconfirmed compensation 3 times and then marks its leg `STUCK` for Admin.
+  A late `charged` is always refunded, reopening a `FAILED` order.
+  payment-service and inventory-service are unchanged; their dead-letter
+  topics are handled by the deadline and the resends (Section 2,
+  order-service; Section 4).
+- **Decided** (was open): order-service has its own transactional outbox, for
+  every request and for `order.succeeded` and `order.failed` (Section 5).
+- **Decided** (was open): the commission rate in force at order time is read
+  from merchant-service's `GET /internal/merchants` at checkout and
+  snapshotted on the order's charge leg (Section 2, order-service).
+- Known limitation, accepted for now: order-service's results can lag in Kafka
+  for longer than the deadline without a restart (a slow or stopped listener).
+  The order is then failed and compensated although every leg may have
+  succeeded. That is correct, only unnecessary; the startup grace covers only
+  the backlog after a restart.
+- Known limitation, accepted for now: changing `BASKETRY_ORDER_FINGERPRINT_KEY`
+  makes a replay of a checkout sent before the change a 409
+  `IDEMPOTENCY_KEY_REUSED` (Section 2, order-service).
+- Known limitation, accepted for now: the card number stays on the charge
+  request topic, and in payment-service's dead-letter topic, for the topics'
+  retention of 7 days, and in PostgreSQL's write-ahead log until it is
+  recycled (Section 2, order-service). A real system sends a token.
 - Tokens carry no `iss` or `aud` claim, so a service accepts any token
   signed by identity-service's key. Accepted for now.
 - Known limitation, accepted for now: one admin retries a merchant's link
@@ -1736,10 +2235,10 @@ at-least-once delivery means duplicates are expected, not exceptional.
   inventory-service). The merchant sees the new quantity in the answer and can
   correct it. The later fix is an `Idempotency-Key` header, stored with the
   result of the first request.
-- When order-service gets stuck-saga handling and gives up on a reservation
-  that never answered, it must still send the release: inventory-service then
-  stores a tombstone, so the reservation, if it arrives late, takes nothing
-  (Section 2, inventory-service). Decide together with the stuck-saga handling.
+- **Decided** (was open): when order-service gives up on a reservation that
+  never answered, it still sends the release, so inventory-service stores a
+  tombstone and a late reservation takes nothing (Section 2, order-service and
+  inventory-service).
 - **Decided** (was open): catalog-service creates a product's stock row in
   inventory-service from a transactional outbox, written with the product and
   relayed to `POST /internal/stock` with retries; a row of another merchant
@@ -1811,6 +2310,15 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   (401), so new products stay out of stock and listings show availability
   `UNKNOWN`. Its Redis is the same pod as inventory-service's, which runs
   `volatile-lru` there too (Section 7, Local development).
+  merchant-service now also serves `GET /internal/merchants` with the same
+  `BASKETRY_INTERNAL_API_KEY`. order-service needs `BASKETRY_KAFKA_BOOTSTRAP_SERVERS`,
+  `BASKETRY_IDENTITY_URL`, `BASKETRY_CATALOG_URL` and `BASKETRY_MERCHANT_URL`
+  (ConfigMap), and in its Secret `BASKETRY_INTERNAL_API_KEY` (for catalog-service
+  and merchant-service; without it every checkout is a 503
+  `INTERNAL_API_KEY_NOT_CONFIGURED`) and `BASKETRY_ORDER_FINGERPRINT_KEY` (at
+  least 32 characters; without it every checkout is a 503
+  `FINGERPRINT_KEY_NOT_CONFIGURED`). Its database is `orders` (`order` is an
+  SQL keyword), with the user `orders`.
 - The deployed profile has **no default database passwords**: each service
   gets `BASKETRY_DB_PASSWORD` from its own Secret. The `local-dev-only-…`
   defaults in `application-postgres.yml` are for local development only, and a
@@ -1905,8 +2413,13 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   another merchant gets a stock-row `CONFLICT` and stays out of stock for good
   (Section 2, catalog-service). Its local merchant statuses are lost too, and
   every merchant reads as active until its next status event: its consumer
-  group's offset is kept in Kafka, so the old events are not read again. On Postgres each
-  service can be restarted on its own.
+  group's offset is kept in Kafka, so the old events are not read again.
+  Restarting only order-service loses every order and starts order ids at 1
+  again, while payment-service and inventory-service keep their rows keyed by
+  `orderId`: a new order 7 then gets the stored answers of the old order 7 (its
+  `charged` with the old reference, its reservations) instead of being decided
+  (Section 2, order-service). On Postgres each service can be restarted on its
+  own.
 - **Interim:** REQUIREMENTS asks for the whole system to start with one
   documented command. For now Compose holds Kafka, Redis and Postgres, and the
   services run from IntelliJ. The rest joins as each piece is built.
