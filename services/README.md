@@ -11,7 +11,7 @@ they talk to each other.
 | `merchant-service` | 8082 | Done (deployment items open) |
 | `inventory-service` | 8083 | Done (deployment items open) |
 | `payment-service` | 8084 | Done (deployment items open) |
-| `order-service` | 8085 | In progress (checkout, model and outbox built; coordinator, REST API and security next) |
+| `order-service` | 8085 | In progress (checkout, outbox, coordinator, result consumers and timer built; REST API and security next) |
 | `promotion-service` | 8086 | Not started |
 | `conversation-service` | 8087 | Not started |
 | `platform-service` | 8088 | Not started |
@@ -51,7 +51,10 @@ have a TTL) and never a stock counter (no TTL; DESIGN.md Section 7).
 All six services also run without Kafka. order-service: a checkout is still
 accepted, and its requests wait in its outbox until the broker is back (a
 checkout does need identity-service, catalog-service and merchant-service: if
-one is down, it is refused with a 503 and nothing is stored). merchant-service:
+one is down, it is refused with a 503 and nothing is stored). Its result
+listeners connect once the broker is back. An outage longer than the 2-minute
+deadline fails the orders it holds up: their unsent requests are cancelled and
+compensated (DESIGN.md Section 2, order-service, the timer). merchant-service:
 `PATCH` still works and the events wait in its outbox until the broker is back.
 identity-service: login and every other request still work, and the status
 consumer catches up once the broker is back. payment-service: the request

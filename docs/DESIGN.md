@@ -914,8 +914,18 @@ row lock:
   failed before the listeners have read them. The listeners run from the start.
 - Settings: `basketry.order.saga-deadline` (2 min), `basketry.order.timer-interval`
   (5 s), `basketry.order.startup-grace` (60 s),
-  `basketry.order.compensation.resend-interval` (1 min) and
-  `basketry.order.compensation.max-resends` (3).
+  `basketry.order.compensation.resend-interval` (1 min),
+  `basketry.order.compensation.max-resends` (3) and
+  `basketry.order.timer.batch-size` (100). A pass reads the orders past their
+  deadline, those with a refund due and those with a release due, each up to the
+  batch, and handles at most one batch of them, lowest id first. A failure on
+  one order (a lock timeout) is logged and left for the next pass. The relay
+  and the timer get a scheduler thread each (`spring.task.scheduling.pool.size`
+  2), so a long pass of one never holds up the other.
+- A charged result for a leg still `REQUESTED` on a `FAILING` order goes
+  straight to `REFUND_REQUESTED` (with its `transactionRef`); a late charge for a
+  `TIMED_OUT` leg keeps its `reasonCode` `NO_RESULT`, because that leg is what
+  failed the order.
 - **Two instances** are safe: the order's row lock decides who acts, and every
   change is conditional on the leg's state.
 
@@ -2157,6 +2167,9 @@ inventory-service):
 - **Switches:** `basketry.order-results.consumer.enabled`,
   `basketry.outbox.relay.enabled` and `basketry.order.timer.enabled`, all off
   in tests, which call the services directly unless a test class turns them on.
+  The retry waits are `basketry.order-results.retry-initial` (1 s) and
+  `retry-max` (60 s); the dead-letter topics' partitions
+  `basketry.order-results.dead-letter-partitions` (3).
 
 **`order.succeeded`** (one per order, written in the transaction that decides
 `SUCCEEDED`; platform-service and promotion-service will need nothing else):
@@ -2180,8 +2193,11 @@ again after a reopen, with a new `eventId`):
  "occurredAt":"2026-11-13T10:00:00Z"}
 ```
 `reasons` lists every leg that failed: a declined charge (its response code),
-a failed reservation (its reason code) and a leg that timed out (`NO_RESULT`).
-Neither event carries any part of the card number.
+a failed reservation (its reason code) and a leg that timed out (`NO_RESULT`),
+the charge legs first by `merchantId`, then the lines by `productId`. A reason
+has `merchantId` for a `CHARGE` and `productId` for a `RESERVE`, never both
+and never a `null`. Neither event carries any part of the card number. Golden
+JSON files of both, with the values above, are checked in order-service's tests.
 
 The `order.*` events carry the `orderId` (and `merchantId`/`productId` where
 relevant) as a natural idempotency key — consumers must treat redelivery

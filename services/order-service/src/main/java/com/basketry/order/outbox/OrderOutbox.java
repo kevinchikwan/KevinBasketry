@@ -1,6 +1,10 @@
 package com.basketry.order.outbox;
 
+import com.basketry.order.order.CustomerOrder;
 import com.basketry.order.order.MerchantCharge;
+import com.basketry.order.outbox.OrderEvents.OrderFailed;
+import com.basketry.order.outbox.OrderEvents.OrderSucceeded;
+import com.basketry.order.outbox.OrderEvents.Reason;
 import com.basketry.order.order.OrderLine;
 import com.basketry.order.order.OrderPlacement.Placed;
 import com.basketry.order.outbox.OrderRequests.MerchantChargeRequested;
@@ -72,6 +76,31 @@ public class OrderOutbox {
         Instant now = clock.instant();
         write(OrderRequests.RELEASE_TOPIC, orderId, eventId, now, new StockReleaseRequested(
                 OrderRequests.SCHEMA_VERSION, eventId, orderId, productId, quantity, now));
+    }
+
+    /** order.succeeded, in the transaction that decides SUCCEEDED. Fails if no transaction is open. */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void recordSucceeded(CustomerOrder order, List<MerchantCharge> charges, List<OrderLine> lines) {
+        UUID eventId = UUID.randomUUID();
+        Instant now = clock.instant();
+        write(OrderRequests.SUCCEEDED_TOPIC, order.getId(), eventId, now, new OrderSucceeded(
+                OrderEvents.SCHEMA_VERSION, eventId, order.getId(), order.getOrderReference(),
+                order.getBuyerAccountId(), order.getCouponCode(), order.getTotalAmount(),
+                charges.stream().map(charge -> new OrderEvents.Merchant(charge.getMerchantId(), charge.getSubtotal(),
+                        charge.getDiscount(), charge.getAmount(), charge.getCommissionRate(), charge.getCommission(),
+                        charge.getTransactionRef())).toList(),
+                lines.stream().map(line -> new OrderEvents.Item(line.getProductId(), line.getMerchantId(),
+                        line.getQuantity(), line.getUnitPrice(), line.getLineAmount())).toList(),
+                now));
+    }
+
+    /** order.failed, each time the order becomes FAILED. Fails if no transaction is open. */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void recordFailed(CustomerOrder order, List<Reason> reasons) {
+        UUID eventId = UUID.randomUUID();
+        Instant now = clock.instant();
+        write(OrderRequests.FAILED_TOPIC, order.getId(), eventId, now, new OrderFailed(OrderEvents.SCHEMA_VERSION,
+                eventId, order.getId(), order.getOrderReference(), reasons, now));
     }
 
     /**

@@ -27,7 +27,29 @@ spring:
   # its first publish.
   kafka:
     bootstrap-servers: ${BASKETRY_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
-    # A send either finishes or fails within these limits.
+    # The six result listeners (DESIGN.md Section 5, order-service results).
+    consumer:
+      group-id: order-service
+      # Results published before this service first started are still read.
+      auto-offset-reset: earliest
+      # The container commits after each record is applied, never before.
+      enable-auto-commit: false
+      # Applying a result may wait up to 5 s for the order's row lock; 50 records
+      # stay well inside max.poll.interval.ms (5 minutes), the default 500 would not.
+      max-poll-records: 50
+      properties:
+        # payment-service and inventory-service own the result topics and create
+        # them on their first publish. Until then they are missing, which is normal;
+        # this is how soon the consumer notices them (the client's default is 5 minutes).
+        allow.auto.create.topics: false
+        metadata.max.age.ms: 10000
+        # Keeps the log readable while the broker is down.
+        reconnect.backoff.max.ms: 10000
+    listener:
+      ack-mode: record
+      concurrency: 1
+      missing-topics-fatal: false
+    # The relay and the dead-letter topics. A send either finishes or fails within these limits.
     producer:
       acks: all
       properties:
@@ -43,11 +65,12 @@ spring:
         request.timeout.ms: 3000
         default.api.timeout.ms: 3000
 
-  # One timer for now, the outbox relay.
+  # Two timers, the outbox relay and the saga timer, so a long pass of one never
+  # holds up the other (as inventory-service's relay and reconciliation).
   task:
     scheduling:
       pool:
-        size: 1
+        size: 2
 
 # The health endpoint only, with no details.
 management:
@@ -86,8 +109,30 @@ basketry:
     # Never committed. Unset = a WARN at startup and every checkout refused with
     # 503; set = at least 32 characters.
     fingerprint-key: ${BASKETRY_ORDER_FINGERPRINT_KEY:}
-    # A result not in by then counts as failed (the timer comes with the coordinator).
+    # The saga timer (DESIGN.md Section 2, order-service, the timer).
+    # A result not in by then counts as failed.
     saga-deadline: 2m
+    timer-interval: 5s
+    # After a start, the timer waits this long, so results still queued in Kafka are read first.
+    startup-grace: 60s
+    timer:
+      enabled: true
+      batch-size: 100
+    compensation:
+      # An unconfirmed refund or release is sent again after this, at most max-resends
+      # times; then its leg is STUCK and the order needs attention.
+      resend-interval: 1m
+      max-resends: 3
+  # The six result listeners and their dead-letter topics (DESIGN.md Section 5).
+  order-results:
+    consumer:
+      enabled: true
+    # Each result topic's dead-letter topic is its name plus ".order-service.DLT", created here on first use.
+    dead-letter-partitions: 3
+    replication-factor: 1
+    # After a database failure (a row-lock timeout included): wait 1s, 2s, 4s ... up to 60s, with no limit.
+    retry-initial: 1s
+    retry-max: 60s
   # The request topics, order.succeeded and order.failed, and the relay that publishes the outbox rows.
   outbox:
     # Fixed: changing the count later moves keys between partitions and breaks per-order order.

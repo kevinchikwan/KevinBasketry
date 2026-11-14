@@ -1,0 +1,1 @@
+{"schemaVersion":1,"eventId":"00000000-0000-4000-8000-000000000006","orderId":7,"orderReference":"ORD-AAAAAAAAAAAAAAAAAAAA","reasons":[{"leg":"CHARGE","merchantId":3,"reasonCode":"51"},{"leg":"RESERVE","productId":42,"reasonCode":"INSUFFICIENT_STOCK"}],"occurredAt":"2026-11-13T10:00:00Z"}

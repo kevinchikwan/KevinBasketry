@@ -75,6 +75,59 @@ public class OrderLine implements Persistable<OrderLine.Key> {
         this.isNew = true;
     }
 
+    /** A reserved result for a line still REQUESTED. */
+    public void reserved() {
+        this.status = LineStatus.RESERVED;
+    }
+
+    /** A reservation-failed result for a line still REQUESTED, with inventory-service's code. */
+    public void reservationFailed(String reasonCode) {
+        this.status = LineStatus.FAILED;
+        this.reasonCode = reasonCode;
+    }
+
+    /** No result by the deadline: a release is requested at once, so a late reserve takes nothing. */
+    public void timedOut(Instant dueAt) {
+        this.status = LineStatus.TIMED_OUT;
+        this.reasonCode = MerchantCharge.NO_RESULT;
+        this.resends = 0;
+        this.compensationDueAt = dueAt;
+    }
+
+    /** A release requested for a RESERVED line. */
+    public void releaseRequested(Instant dueAt) {
+        this.status = LineStatus.RELEASE_REQUESTED;
+        this.resends = 0;
+        this.compensationDueAt = dueAt;
+    }
+
+    /** The release sent again; due again at {@code dueAt}. TIMED_OUT and RELEASE_REQUESTED alike. */
+    public void releaseResent(Instant dueAt) {
+        this.resends++;
+        this.compensationDueAt = dueAt;
+    }
+
+    /** Resent the maximum number of times and still not confirmed. */
+    public void stuck() {
+        this.status = LineStatus.STUCK;
+        this.compensationDueAt = null;
+    }
+
+    public void released() {
+        this.status = LineStatus.RELEASED;
+        this.compensationDueAt = null;
+    }
+
+    /** FAILED or RELEASED: it can never need a compensation again. */
+    public boolean settled() {
+        return status == LineStatus.FAILED || status == LineStatus.RELEASED;
+    }
+
+    /** Fails the order: FAILED or TIMED_OUT. */
+    public boolean negative() {
+        return status == LineStatus.FAILED || status == LineStatus.TIMED_OUT;
+    }
+
     @PostPersist
     @PostLoad
     void markNotNew() {

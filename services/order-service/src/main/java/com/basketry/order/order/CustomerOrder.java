@@ -81,6 +81,45 @@ public class CustomerOrder {
         this.deadlineAt = deadlineAt.truncatedTo(ChronoUnit.MICROS);
     }
 
+    /** PENDING to FAILING: the failure is decided (DESIGN.md Section 2, order-service, the decision). */
+    public void markFailing(Instant now) {
+        requireStatus(OrderStatus.PENDING);
+        this.status = OrderStatus.FAILING;
+        this.decidedAt = now.truncatedTo(ChronoUnit.MICROS);
+    }
+
+    /** PENDING to SUCCEEDED: every leg positive. Final. */
+    public void markSucceeded(Instant now) {
+        requireStatus(OrderStatus.PENDING);
+        this.status = OrderStatus.SUCCEEDED;
+        this.decidedAt = now.truncatedTo(ChronoUnit.MICROS);
+        this.completedAt = this.decidedAt;
+    }
+
+    /** FAILING to FAILED: every leg settled. */
+    public void markFailed(Instant now) {
+        requireStatus(OrderStatus.FAILING);
+        this.status = OrderStatus.FAILED;
+        this.completedAt = now.truncatedTo(ChronoUnit.MICROS);
+    }
+
+    /** FAILED back to FAILING: a late charge must be refunded (the reopen). decidedAt stays. */
+    public void reopen() {
+        requireStatus(OrderStatus.FAILED);
+        this.status = OrderStatus.FAILING;
+        this.completedAt = null;
+    }
+
+    public void setNeedsAttention(boolean needsAttention) {
+        this.needsAttention = needsAttention;
+    }
+
+    private void requireStatus(OrderStatus expected) {
+        if (status != expected) {
+            throw new IllegalStateException("Order " + id + " is " + status + ", not " + expected);
+        }
+    }
+
     public Long getId() {
         return id;
     }

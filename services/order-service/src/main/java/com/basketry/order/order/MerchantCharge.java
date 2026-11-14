@@ -78,6 +78,65 @@ public class MerchantCharge implements Persistable<MerchantCharge.Key> {
         this.isNew = true;
     }
 
+    /** A charged result for a leg still REQUESTED. */
+    public void charged(String transactionRef) {
+        this.status = ChargeStatus.CHARGED;
+        this.transactionRef = transactionRef;
+    }
+
+    /** A declined result for a leg still REQUESTED; {@code reasonCode} is the response code. */
+    public void declined(String reasonCode) {
+        this.status = ChargeStatus.DECLINED;
+        this.reasonCode = reasonCode;
+    }
+
+    /** No result by the deadline: nothing to refund, since there is no transactionRef. */
+    public void timedOut() {
+        this.status = ChargeStatus.TIMED_OUT;
+        this.reasonCode = NO_RESULT;
+    }
+
+    /**
+     * A refund requested, the first time: from CHARGED, or from TIMED_OUT when
+     * the charge arrives late (with its transactionRef). The reason code of a
+     * late charge stays NO_RESULT: the leg failed the order.
+     */
+    public void refundRequested(String transactionRef, Instant dueAt) {
+        this.status = ChargeStatus.REFUND_REQUESTED;
+        this.transactionRef = transactionRef;
+        this.resends = 0;
+        this.compensationDueAt = dueAt;
+    }
+
+    /** The refund sent again; due again at {@code dueAt}. */
+    public void refundResent(Instant dueAt) {
+        this.resends++;
+        this.compensationDueAt = dueAt;
+    }
+
+    /** Resent the maximum number of times and still not confirmed. */
+    public void stuck() {
+        this.status = ChargeStatus.STUCK;
+        this.compensationDueAt = null;
+    }
+
+    public void refunded() {
+        this.status = ChargeStatus.REFUNDED;
+        this.compensationDueAt = null;
+    }
+
+    /** DECLINED, REFUNDED or TIMED_OUT: it can never need a compensation again. */
+    public boolean settled() {
+        return status == ChargeStatus.DECLINED || status == ChargeStatus.REFUNDED || status == ChargeStatus.TIMED_OUT;
+    }
+
+    /** Fails the order: DECLINED or TIMED_OUT. */
+    public boolean negative() {
+        return status == ChargeStatus.DECLINED || status == ChargeStatus.TIMED_OUT;
+    }
+
+    public static final String NO_RESULT = "NO_RESULT";
+
     @PostPersist
     @PostLoad
     void markNotNew() {
