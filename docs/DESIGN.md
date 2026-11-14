@@ -1990,6 +1990,10 @@ payment-service; the requests that cause them are below):
   request topics: `org.apache.kafka.clients` and
   `org.springframework.kafka.core.DefaultKafkaProducerFactory`. Both print whole
   records, card number included, and no setting of ours can stop them.
+- **A failed send is logged with its topic and key only**, by payment-service's
+  own producer listener: Spring Boot's default one logs up to 100 characters of
+  the value at ERROR, which for a dead-lettered charge request can be the card
+  number (a test fails a dead-letter publish with the number first).
 - **Switches:** `basketry.payment-requests.consumer.enabled` and
   `basketry.outbox.relay.enabled`, both off in tests, which call `PaymentService`
   and the relay directly unless a test class turns them on.
