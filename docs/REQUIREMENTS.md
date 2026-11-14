@@ -152,8 +152,11 @@ Explicitly out of scope for this version:
 - FR-B13: Buyer can see their own order history with full per-line status,
   including any coupon discount applied.
 - FR-B18: For a failed order whose refunds or stock releases are still in
-  progress, the buyer sees that the order has failed and is being reversed
-  (status `FAILING`), not an order still pending.
+  progress, the buyer sees an order that has failed and is being reversed
+  (status `FAILING`), not an order still pending, and that any charge that went
+  through is refunded. The order never tells the buyer they were not charged:
+  a merchant's charge can arrive after the order failed, and is then refunded,
+  so a failed order shows `FAILING` again until that refund is confirmed.
 - FR-B14: Buyer can open a message thread on an order with a specific
   merchant in that order (e.g. a delivery instruction or a question about
   a declined line), and send further messages in that thread. If the

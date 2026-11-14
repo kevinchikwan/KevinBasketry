@@ -11,7 +11,7 @@ they talk to each other.
 | `merchant-service` | 8082 | Done (deployment items open) |
 | `inventory-service` | 8083 | Done (deployment items open) |
 | `payment-service` | 8084 | Done (deployment items open) |
-| `order-service` | 8085 | In progress (checkout, outbox, coordinator, result consumers and timer built; REST API and security next) |
+| `order-service` | 8085 | In progress (checkout, coordinator, timer, REST API and security built; end-to-end check next) |
 | `promotion-service` | 8086 | Not started |
 | `conversation-service` | 8087 | Not started |
 | `platform-service` | 8088 | Not started |

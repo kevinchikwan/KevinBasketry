@@ -750,7 +750,14 @@ open during a call to another service.
      token forwarded (the endpoint allows "self"). `buyerActive = false` is 403
      `BUYER_DEACTIVATED`; a 404 (data loss) is 403 `BUYER_NOT_FOUND`. The
      answer's `merchantId` (the account's live merchant link) is kept for the
-     `OWN_PRODUCT` rule; its email is never stored or logged.
+     `OWN_PRODUCT` rule; its email is never stored or logged. **Why the live
+     link here and the token's claim for reads:** checkout moves money, and a
+     token can be up to an hour old. A merchant deactivated since its login has
+     a token without `MERCHANT` and without `merchantId`, and an account linked
+     after its token was issued has none either; trusting the token would let
+     either buy its own products, paying itself through the platform. A read
+     moves nothing, so the reads (Section 3) use the token's `merchantId` claim
+     and accept its stale window of up to an hour (Section 2, Tokens).
    - catalog-service `GET /internal/products?ids=` with every line's product,
      in one call (a cart has at most 100 lines, catalog's limit).
    - merchant-service `GET /internal/merchants?ids=` with every merchant
@@ -1448,9 +1455,41 @@ its own JSON type, as everywhere (`"3"` for a number, `1.5` for a whole number,
 `5` for a string are 400s, never converted); any field not listed is a 400
 naming it. CORS allows `basketry.cors.allowed-origins` (GET and POST, the
 headers `Authorization`, `Content-Type` and `Idempotency-Key`, `Location`
-exposed, no credentials). There is no `/internal/**` endpoint yet.
+exposed, no credentials); a browser's preflight is answered before
+authentication. There is no `/internal/**` endpoint yet.
 `GET /actuator/health` (and its probe groups) needs no token, shows no details
-and includes no other service.
+and includes no other service. A token's `sub` must be a positive number (the
+account); identity-service never issues another, so any other is a 401.
+
+- **The order of checks:** the token (the chain: 401 or 503), the header and
+  the body (400, every broken rule at once), the capability (403), then the
+  service.
+- **JSON:** the global Jackson settings (no float for an int, no coercion of
+  scalars) and a strict string reader for `cardNumber` and `couponCode` (Jackson
+  turns a number into text otherwise). An unknown field, at the top or in a line,
+  is a 400 naming it with every other broken rule. A name is echoed only if it
+  starts with a letter, has at most 41 characters of letters, digits and `_`,
+  and has no run of 6 or more digits; any other is only counted, with its path
+  (`2 unknown field(s) at the top level`, `at lines[0]`), so a card number sent
+  as a key, alone or after a letter, never comes back in an answer or a log. A body that is not JSON of the
+  checkout's shape is a 400 with a fixed detail and the field path only (for
+  example `At: lines[1].quantity.`), **never Jackson's message**, which can quote
+  the input.
+- **Body size:** a checkout body over 64 KB is a **413** `BODY_TOO_LARGE`,
+  decided by the bytes actually read, so a chunked body (no Content-Length)
+  is caught too; a declared Content-Length over it is refused before reading. A
+  filter ahead of Spring Security reads at most 64 KB + 1 byte, keeps them only
+  for the request and never logs them. A cart of 100 lines is about 5 KB.
+  Because the 413 is answered ahead of the CORS filter too, it carries no
+  `Access-Control-Allow-Origin`, and a browser reports it as a network error,
+  not as a 413 it can read. Accepted: a real cart is about 5 KB, so only a
+  client that is not the Buyer app ever sees it.
+- **Never logged:** `spring.mvc.log-request-details` is false (it would log
+  headers, so the bearer token), there is no request-logging filter, Tomcat's
+  access log stays off, and the request object masks the card number in
+  `toString` (Spring logs the object it read at DEBUG). A test runs every
+  request path over a real port with Spring's web layer at TRACE and Tomcat at
+  DEBUG.
 
 - `POST /orders/checkout` (a token with `BUYER`; FR-B7 to FR-B12). Starts the
   saga; the steps and their order are in Section 2, order-service.
@@ -1471,9 +1510,10 @@ and includes no other service.
     places, at most 9,999,999,999.99. No 400 ever quotes the card number.
     *(A real system would send a tokenized payment-method reference, never a
     raw card number.)*
-  - **202** with `Location: /orders/{reference}` and the order (below), in
-    `PENDING`, for the first request. The saga runs after the answer; the Buyer
-    app polls `GET /orders/{reference}`.
+  - **202** with `Location: /orders/{reference}` and the order (the buyer's
+    view, below), in `PENDING`, for the first request. The saga runs after the
+    answer; the Buyer app polls `GET /orders/{reference}`. `Location` is a
+    relative URI: behind a gateway, the service cannot know its public host.
   - **200** with the same `Location` and the order **as it stands now** for a
     replay: the same key and the same body.
   - 403: no `BUYER` capability; `BUYER_DEACTIVATED`; `BUYER_NOT_FOUND`.
@@ -1522,14 +1562,32 @@ and includes no other service.
     `merchants: [{merchantId, amount, status, reasonCode}]` and
     `lines: [{productId, merchantId, productName, unitPrice, quantity,
     lineAmount, status, reasonCode}]`. No commission, no `transactionRef`, no
-    `needsAttention`.
+    `needsAttention`. The order's status is shown as it is (`FAILING` is "failed
+    and being reversed", FR-B18; a late charge shows it again). A leg's status
+    is shown as the buyer should read it: `STUCK` as the compensation still
+    requested (`REFUND_REQUESTED`, `RELEASE_REQUESTED`), `TIMED_OUT` as `FAILED`
+    with its reason `NO_RESULT`. Our repair queue is not the buyer's business.
   - Merchant: `reference`, `status`, `buyerAccountId` (**never an email**),
     `createdAt`, its own charge leg only (`subtotal`, `discount`, `amount`,
     `commissionRate`, `commission`, `status`, `reasonCode`, `transactionRef`)
     and its own lines only. Not the order total, not another merchant's lines
     or leg (FR-M3, FR-M8, FR-M9).
-  - Admin: everything the buyer sees, plus `buyerAccountId`, `needsAttention`
-    and every leg's commission fields and `transactionRef`.
+  - Admin: everything, with raw states: plus `buyerAccountId`, `needsAttention`,
+    `deadlineAt`, `decidedAt`, `completedAt`, and for every leg its commission
+    fields, `transactionRef`, `resends` and `compensationDueAt`, what repairing a
+    `STUCK` leg needs.
+  - **A list item is a summary:** `reference`, `status`, `totalAmount` (for the
+    merchant view, its own amount), `createdAt`, `lineCount` (for the merchant
+    view, its own lines), and `needsAttention` for Admin only. The detail is at
+    `GET /orders/{reference}`.
+- **Indexes** (V2): a buyer's orders `(buyer_account_id, id)`, a merchant's
+  `order_line (merchant_id, order_id)`, the repair queue
+  `(needs_attention, id)`, and the timer's three due lists:
+  `customer_order (status, deadline_at)`, `merchant_charge (status,
+  compensation_due_at)` and `order_line (status, compensation_due_at)`; a leg
+  becomes `STUCK` in the same passes, so it needs no list of its own. On 20,000
+  orders, postgresTest checks that no read and no timer query plans a sequential
+  scan; the one exception is Admin's unfiltered count, which counts every row.
 
 **payment-service**
 - No REST endpoints for the front-ends. Its interface is the Kafka topics

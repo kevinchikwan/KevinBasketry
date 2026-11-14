@@ -12,7 +12,7 @@ public class InvalidCheckoutException extends RuntimeException {
     private final List<String> violations;
     private final boolean couponsNotSupported;
 
-    InvalidCheckoutException(List<String> violations, boolean couponsNotSupported) {
+    public InvalidCheckoutException(List<String> violations, boolean couponsNotSupported) {
         super("The checkout breaks " + violations.size() + " rule(s): " + String.join(" ", violations));
         this.violations = List.copyOf(violations);
         this.couponsNotSupported = couponsNotSupported;

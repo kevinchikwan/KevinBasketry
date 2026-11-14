@@ -87,7 +87,12 @@ public abstract class OrderServiceTestBase {
 
     /** An active buyer with no merchant link, whose token identity-service accepts. */
     protected void givenBuyer() {
-        services.givenAccount(BUYER, BUYER_TOKEN, true, null);
+        services.givenAccount(BUYER, buyerToken(), true, null);
+    }
+
+    /** The token the buyer checks out with; identity-service's account answer expects exactly it. */
+    protected String buyerToken() {
+        return BUYER_TOKEN;
     }
 
     /** An active product of an active merchant with a created stock row. */
@@ -99,8 +104,8 @@ public abstract class OrderServiceTestBase {
         services.givenMerchant(id, true, commissionRate);
     }
 
-    protected static Buyer buyer() {
-        return new Buyer(BUYER, BUYER_TOKEN);
+    protected Buyer buyer() {
+        return new Buyer(BUYER, buyerToken());
     }
 
     /** {@code lines} as productId, quantity, productId, quantity ... */

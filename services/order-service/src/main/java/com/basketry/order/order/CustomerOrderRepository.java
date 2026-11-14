@@ -7,6 +7,8 @@ import java.util.List;
 import java.util.Optional;
 import org.hibernate.jpa.SpecHints;
 import org.springframework.data.domain.Limit;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
@@ -25,6 +27,19 @@ public interface CustomerOrderRepository extends JpaRepository<CustomerOrder, Lo
     Optional<CustomerOrder> findByBuyerAccountIdAndIdempotencyKey(long buyerAccountId, String idempotencyKey);
 
     Optional<CustomerOrder> findByOrderReference(String orderReference);
+
+    /** A buyer's own orders (ix_customer_order_buyer_id). */
+    Page<CustomerOrder> findByBuyerAccountId(long buyerAccountId, Pageable pageable);
+
+    /** The orders with at least one line of this merchant (ix_order_line_merchant_order). */
+    @Query(value = "select o from CustomerOrder o where exists (select l from OrderLine l"
+            + " where l.orderId = o.id and l.merchantId = :merchantId)",
+            countQuery = "select count(o) from CustomerOrder o where exists (select l from OrderLine l"
+                    + " where l.orderId = o.id and l.merchantId = :merchantId)")
+    Page<CustomerOrder> findWithLinesOf(long merchantId, Pageable pageable);
+
+    /** Admin's repair queue (ix_customer_order_attention_id). */
+    Page<CustomerOrder> findByNeedsAttentionTrue(Pageable pageable);
 
     /**
      * Reads and locks the order, first thing in every transaction that applies a

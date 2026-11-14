@@ -21,6 +21,10 @@ dependencies {
 
     // The web server, and RestClient for identity-service, catalog-service and merchant-service.
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
+    implementation("org.springframework.boot:spring-boot-starter-security")
+    // Bearer-token authentication: verifies identity-service's RS256 tokens against its JWKS endpoint.
+    implementation("org.springframework.security:spring-security-oauth2-resource-server")
+    implementation("org.springframework.security:spring-security-oauth2-jose")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     implementation("org.springframework.boot:spring-boot-starter-flyway")
@@ -33,6 +37,7 @@ dependencies {
     runtimeOnly("org.flywaydb:flyway-database-postgresql")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
     // Embedded KRaft broker, so no test needs Docker.
     testImplementation("org.springframework.boot:spring-boot-starter-kafka-test")
     // Only for postgresTest; the default test task never starts a container.

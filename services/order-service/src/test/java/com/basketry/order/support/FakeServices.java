@@ -67,6 +67,9 @@ public final class FakeServices {
         server.createContext(ACCOUNTS, exchange -> handle(exchange, ACCOUNTS));
         server.createContext(PRODUCTS, exchange -> handle(exchange, PRODUCTS));
         server.createContext(MERCHANTS, exchange -> handle(exchange, MERCHANTS));
+        // identity-service's public keys, for verifying bearer tokens: always TestTokens.KEY.
+        server.createContext("/.well-known/jwks.json", exchange -> respond(exchange, 200,
+                new com.nimbusds.jose.jwk.JWKSet(TestTokens.KEY.toPublicJWK()).toString()));
         server.start();
     }
 

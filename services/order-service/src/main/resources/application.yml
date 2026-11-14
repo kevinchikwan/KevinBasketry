@@ -1,6 +1,11 @@
 server:
   # Fixed port map in services/README.md.
   port: 8085
+  tomcat:
+    # Off, as by default; stated so nobody turns it on to debug checkout. It
+    # would never log bodies, but its patterns can log headers.
+    accesslog:
+      enabled: false
 
 spring:
   application:
@@ -21,6 +26,24 @@ spring:
 
   flyway:
     locations: classpath:db/migration
+
+  # Errors are returned as RFC 9457 problem details, never as stack traces.
+  mvc:
+    problemdetails:
+      enabled: true
+    # Never log request details (parameters, headers): set explicitly, so the
+    # rule does not depend on a default. The checkout body is never logged at
+    # all (DESIGN.md Section 2, order-service, the card number).
+    log-request-details: false
+
+  # As in identity-service and catalog-service: a number like 1.5 sent for a
+  # whole-number field is a 400, never truncated, and a field takes only its own
+  # JSON type: "5" for a number or 0 for a boolean is a 400, never converted.
+  jackson:
+    deserialization:
+      accept-float-as-int: false
+    mapper:
+      allow-coercion-of-scalars: false
 
   # The four request topics and order.succeeded / order.failed out (DESIGN.md
   # Section 5). Startup never waits for Kafka: the relay creates the topics on
@@ -83,6 +106,10 @@ management:
       show-details: never
 
 basketry:
+  cors:
+    # Vite's default dev-server port. Widen this (comma-separated) once the Buyer,
+    # Merchant and Admin apps exist (DESIGN.md Section 1).
+    allowed-origins: http://localhost:5173
   identity:
     # identity-service: GET /accounts/{id}, the live buyer check at checkout.
     base-url: ${BASKETRY_IDENTITY_URL:http://localhost:8080}
