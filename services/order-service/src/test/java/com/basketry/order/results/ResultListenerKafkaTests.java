@@ -16,9 +16,18 @@ import com.basketry.order.support.TopicReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.ConsumerGroupDescription;
+import org.apache.kafka.clients.admin.GroupListing;
+import org.apache.kafka.clients.admin.MemberDescription;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.header.Header;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -143,6 +152,44 @@ class ResultListenerKafkaTests extends SagaTestBase {
                 || header.startsWith("kafka_dlt-exception-cause-fqcn"));
         await().atMost(PATIENCE).untilAsserted(() ->
                 assertThat(chargeOf(id, MERCHANT).getStatus()).isEqualTo(ChargeStatus.CHARGED));
+    }
+
+    /**
+     * The six listeners form one consumer group, order-service (the
+     * spring.kafka.consumer.group-id), as payment-service's and
+     * inventory-service's do, and between them hold every partition of the six
+     * result topics. TopicReader's own groups ("test-...") are left out.
+     * Mutation: one listener without idIsGroup = false (it forms its own group,
+     * named after its id).
+     */
+    @Test
+    void theSixListenersFormOneConsumerGroup() {
+        try (Admin admin = Admin.create(Map.<String, Object>of(
+                AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, broker.getBrokersAsString()))) {
+            await().atMost(PATIENCE).untilAsserted(() -> {
+                List<String> groups = admin.listGroups().all().get().stream()
+                        .map(GroupListing::groupId)
+                        .filter(group -> !group.startsWith("test-"))
+                        .sorted()
+                        .toList();
+                assertThat(groups).containsExactly("order-service");
+                ConsumerGroupDescription group = admin.describeConsumerGroups(List.of("order-service"))
+                        .all().get().get("order-service");
+                assertThat(group.members()).hasSize(6);
+                Set<String> assigned = new TreeSet<>();
+                long partitions = 0;
+                for (MemberDescription member : group.members()) {
+                    for (TopicPartition partition : member.assignment().topicPartitions()) {
+                        assigned.add(partition.topic());
+                        partitions++;
+                    }
+                }
+                assertThat(assigned).containsExactlyInAnyOrder(ResultTopics.CHARGED, ResultTopics.DECLINED,
+                        ResultTopics.REFUNDED, ResultTopics.RESERVED, ResultTopics.RESERVATION_FAILED,
+                        ResultTopics.RELEASED);
+                assertThat(partitions).isEqualTo(18);
+            });
+        }
     }
 
     /**
