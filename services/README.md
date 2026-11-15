@@ -11,7 +11,7 @@ they talk to each other.
 | `merchant-service` | 8082 | Done (deployment items open) |
 | `inventory-service` | 8083 | Done (deployment items open) |
 | `payment-service` | 8084 | Done (deployment items open) |
-| `order-service` | 8085 | In progress (checkout, coordinator, timer, REST API and security built; end-to-end check next) |
+| `order-service` | 8085 | Done (deployment items open) |
 | `promotion-service` | 8086 | Not started |
 | `conversation-service` | 8087 | Not started |
 | `platform-service` | 8088 | Not started |
@@ -314,6 +314,121 @@ The other result topics are `order.stock.reservation-failed` and
 new record. A quantity above 1,000 is answered `QUANTITY_OVER_LIMIT`; a quantity
 of 0 or less, a non-whole number, an unknown field or another `schemaVersion`
 goes to the dead-letter topic (DESIGN.md Section 5).
+
+## Trying order-service by hand
+
+A checkout runs through all six services: start Kafka and Redis
+(`docker compose up -d --wait`), then each service from a PowerShell window in
+which the internal key and the fingerprint key are set first (any values of at
+least 32 characters; the fingerprint key only matters to order-service):
+
+```
+$env:BASKETRY_INTERNAL_API_KEY = 'local-dev-only-internal-key-00000000'
+$env:BASKETRY_ORDER_FINGERPRINT_KEY = 'local-dev-only-fingerprint-key-00000'
+.\gradlew.bat :order-service:bootRun    # and :identity-service, :catalog-service, :merchant-service, :inventory-service, :payment-service
+```
+
+order-service (port 8085) creates its request topics, `order.succeeded` and
+`order.failed` on its first publish; payment-service and inventory-service
+create their result topics on theirs, and order-service's listeners find them
+within 10 s. None needs creating by hand. Onboard a merchant, create a product
+and give it stock first ("Trying catalog-service's REST API by hand" above:
+`$admin`, `$shop`, `$productId`, ten units of Green Tea at 4.50). Then, in the
+same window, register a buyer and log in:
+
+```
+Invoke-RestMethod -Method Post http://localhost:8080/accounts/register -ContentType 'application/json' -Body '{"email":"buyer@example.com","password":"Buyer-Pass1"}'
+$buyer = (Invoke-RestMethod -Method Post http://localhost:8080/auth/login -ContentType 'application/json' -Body '{"email":"buyer@example.com","password":"Buyer-Pass1"}').accessToken
+```
+
+Check out two units with an approved test card. `expectedTotal` is the total
+the buyer was shown; the `Idempotency-Key` (8 to 64 characters of
+`A-Za-z0-9_-`) makes a retry safe:
+
+```
+$cart = @{ lines = @(@{ productId = $productId; quantity = 2 }); cardNumber = '4000000000000002'; expectedTotal = 9.00 } | ConvertTo-Json -Depth 3
+$key = 'my-first-order-0001'
+$order = Invoke-WebRequest -UseBasicParsing -Method Post http://localhost:8085/orders/checkout -Headers @{ Authorization = "Bearer $buyer"; 'Idempotency-Key' = $key } -ContentType 'application/json' -Body $cart
+$order.StatusCode; $order.Headers.Location
+```
+
+It answers 202, `Location: /orders/ORD-...` and the order in `PENDING`; the saga
+runs after the answer. Sending the same line again answers 200 with the same
+`Location` and the order as it stands, and creates nothing. Read the order as
+its buyer, and as Admin (raw leg states, `deadlineAt`, `decidedAt`,
+`completedAt`, commission, `transactionRef`, resends):
+
+```
+Invoke-RestMethod "http://localhost:8085$($order.Headers.Location)" -Headers @{ Authorization = "Bearer $buyer" } | ConvertTo-Json -Depth 5
+Invoke-RestMethod "http://localhost:8085$($order.Headers.Location)" -Headers @{ Authorization = "Bearer $admin" } | ConvertTo-Json -Depth 5
+```
+
+Within a second or two it is `SUCCEEDED`: the charge leg `CHARGED`, the line
+`RESERVED`, and `GET /stock` (as the merchant) shows two units fewer. The
+merchant reads it too, its own leg and lines only, with
+`-Headers @{ Authorization = "Bearer $shop" }`. List orders, as the buyer
+(newest first; `?view=merchant` with a merchant's token), as Admin, and Admin's
+repair queue, the orders with a leg `STUCK`:
+
+```
+Invoke-RestMethod http://localhost:8085/orders -Headers @{ Authorization = "Bearer $buyer" } | ConvertTo-Json -Depth 5
+Invoke-RestMethod http://localhost:8085/orders -Headers @{ Authorization = "Bearer $admin" } | ConvertTo-Json -Depth 5
+Invoke-RestMethod "http://localhost:8085/orders?needsAttention=true" -Headers @{ Authorization = "Bearer $admin" } | ConvertTo-Json -Depth 5
+```
+
+A refusal makes `Invoke-WebRequest` throw; read its problem detail with the
+`try` line of the catalog section above. A price changed since the cart was
+shown is a 409 `PRICE_CHANGED` with the current prices and total, and nothing
+is stored. The card `4000000000000010` declines (DESIGN.md Section 2,
+payment-service, has the table); a quantity above the stock fails the
+reservation; either way every charge taken is refunded, every reservation
+released, and the order ends `FAILED` (`FAILING` while that runs). Read the
+outcomes from the repo root (each consumer stops after 10 s without a new
+record):
+
+```
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:29092 --topic order.succeeded --from-beginning --property print.key=true --timeout-ms 10000
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:29092 --topic order.failed --from-beginning --property print.key=true --timeout-ms 10000
+```
+
+Both are keyed by the orderId (the number in every saga event; the API shows
+only the reference). `order.succeeded` carries each merchant's commission rate
+and commission; `order.failed` carries the reasons, and comes again with a new
+`eventId` when a late charge reopens a failed order. The results and requests
+in between are on the topics of the two sections above, read with the same
+consumer line.
+
+A result order-service can never apply goes to its own dead-letter topic,
+`<result topic>.order-service.DLT`, with the record's exact bytes and our two
+exception headers. To see one, produce a `charged` result with a malformed
+`transactionRef` (one `key|value` line; Ctrl+C to stop), then read the
+dead-letter topic:
+
+```
+docker compose exec kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:29092 --topic order.merchant.charged --property parse.key=true --property key.separator="|"
+7|{"schemaVersion":1,"orderId":7,"merchantId":1,"transactionRef":"TXN-not-a-reference"}
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:29092 --topic order.merchant.charged.order-service.DLT --from-beginning --property print.key=true --property print.headers=true --timeout-ms 10000
+```
+
+Its headers include
+`kafka_dlt-exception-message:transactionRef must be TXN- and 32 lowercase hex digits`,
+and nothing else changes. order-service's six result listeners are the six
+members of one consumer group, `order-service` (as payment-service's two are
+of `payment-service`); see whether it is `Stable` with its six members (a group
+shows `PreparingRebalance` or `CompletingRebalance` while it is being
+rebalanced):
+
+```
+docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:29092 --describe --all-groups --state
+```
+
+Without the fingerprint key, every checkout is refused with 503
+`FINGERPRINT_KEY_NOT_CONFIGURED`; without the internal key, with 503
+`INTERNAL_API_KEY_NOT_CONFIGURED`; with identity-, catalog- or merchant-service
+down, with 503 and nothing stored. A result that does not come within 2 minutes
+counts as failed (DESIGN.md Section 2, order-service, the timer).
+`scripts/e2e-order.ps1` runs all of this and the saga's failure paths against
+real processes (see End-to-end check).
 
 ## Running a service on Postgres
 
@@ -647,3 +762,104 @@ instead of 6379 if set; with `-Postgres` also 5432, or
 the ports are the same, so still run one script at a time), and exits with 6 if
 this README no longer has the exact commands it runs. A run takes about 2
 minutes, 3 with `-Postgres`. Its logs go to `build\e2e\catalog`.
+
+`scripts/e2e-order.ps1` runs the checkout saga across all six services. Every
+command it runs is one of this README's, run as shown: the REST commands of
+"Trying catalog-service's REST API by hand" onboard two merchants (the second
+with another name, email and a 7.50 % rate), create three products, add stock
+and change a price; inventory-service's `GET /stock` line reads the stock; the
+commands of "Trying order-service by hand" register the buyer, check out, read
+the order as buyer and Admin, list orders, read `order.succeeded`,
+`order.failed` and the dead-letter topic, produce the malformed result and
+describe the consumer groups; the consumer lines of the payment-service and
+inventory-service sections, with only the topic swapped, read the results and
+the refund and release requests. Its scenarios, and what proves each:
+
+- **Two merchants, an approved card:** `SUCCEEDED` in the buyer and Admin
+  views; the stock down by the quantities; two `charged` and two `reserved`
+  records; one `order.succeeded` with each merchant's rate snapshot and exact
+  commission (0.225 rounds to 0.23: HALF_UP, where HALF_EVEN would give 0.22).
+- **A replay and a price change:** the same key and body answers 200 with the
+  same `Location`, and the order count and `charged` records do not change;
+  after the merchant's price change, the old `expectedTotal` gets 409
+  `PRICE_CHANGED` and nothing is stored.
+- **A decline:** both legs `DECLINED` 51, both lines released, the stock back,
+  one `order.failed` with the two reasons, no refund requested.
+- **One product short of stock:** both merchants charged, the reservation
+  failed `INSUFFICIENT_STOCK`, both charges refunded, the other line released.
+  `FAILING` is proven from the evidence (`decidedAt` before `completedAt`, the
+  refund and release requests), because it lasts milliseconds.
+- **A malformed `charged` result** ahead of the real one for the same order (the
+  same key): the dead letter has its exact bytes and our two headers, and the
+  real result behind it is applied.
+- **payment-service stopped past the deadline:** both charge legs `TIMED_OUT`
+  (`NO_RESULT`), the lines released, `FAILED` with an `order.failed`. Then
+  payment-service starts, the late charges arrive, and the order is reopened:
+  proven by a second `order.failed` with another `eventId`, the refund requests
+  and their `refunded` results between the two, and `completedAt` set again.
+  The buyer view is polled every 200 ms meanwhile; whether it caught `FAILING`
+  is printed, never a failure.
+- **inventory-service stopped past the deadline:** payment charges; at the
+  deadline the line is `TIMED_OUT` and the order `FAILING`, and it stays
+  `FAILING` while inventory-service is down (read 10 times over 5 s); the
+  charge is refunded and the line's release is requested while it is down
+  (both shown by `occurredAt`, before the restart). Once inventory-service is
+  back, the line is `RELEASED`, the stock is back where it started, and the
+  order ends `FAILED`. inventory-service answers the late reserve once:
+  `RELEASED_BEFORE_RESERVE`, from the tombstone its release left (or `reserved`
+  and then released, if it happens to read the reserve first; the script prints
+  which).
+- **With `-Postgres`, order-service force-killed** with an order whose requests
+  are sent: payment-service and inventory-service answer while it is down (they
+  are stopped before the checkout and started once it is down, because their
+  results otherwise arrive within a second, before any kill); it
+  is restarted after the order's deadline, and within its 60 s startup grace the
+  listeners apply the queued results: `SUCCEEDED`, decided after the deadline.
+  The consumer group's rejoin time is printed, and the run fails above 50 s;
+  here the old members' 45 s session has expired before the restart, so it is
+  short.
+- **With `-Postgres`, the same, restarted within about 5 s of the kill**
+  (payment-service and inventory-service start with it): the new members wait
+  for the old ones' session to time out. The rejoin time is printed, and the
+  run fails above 50 s; the order ends `SUCCEEDED`, decided after its deadline,
+  which passes during the wait.
+
+Last, it checks that no leg is `STUCK`, that every saga topic exists although
+nobody created one by hand, that the dead-letter topic holds only the one
+record, and that no service log contains the card number used, the internal
+key, the fingerprint key, a database password or a bearer token of the run.
+With `-Postgres` also the legs, the outbox and `payment_transaction` rows of the
+first orders (`APPROVED`, then `REFUNDED`, with only the last 4 digits), and that
+the card number is in no stored value of `orders` or `payment`. It does not
+cover, live: one merchant declining while another is charged (the mock decides
+by card number and an order has one card; the shortage scenario covers the
+refund path, the tests the rest); a leg going `STUCK` after 3 resends
+(`SagaTimerTests` only); and a late `reserved` on a `TIMED_OUT` line
+(inventory-service has answered the late reserve `RELEASED_BEFORE_RESERVE` in
+every run, and no test sends a `reserved` to a timed-out line yet:
+`SagaDecisionTests` sends `declined` and `reservation-failed` to one).
+
+order-service runs with `--basketry.order.saga-deadline=30s`,
+`--basketry.order.timer-interval=1s` and
+`--basketry.order.compensation.resend-interval=10s` on its command line (the
+startup grace stays 60 s), and the script waits until order-service's consumer
+group is `Stable` with its six members before the first scenario and before
+each one that waits for the deadline. inventory-service runs on an H2 file in
+`build\e2e\order`, so its restart keeps its stock. Every service it starts gets
+`JAVA_TOOL_OPTIONS=-Xmx384m`, and it runs `gradlew --stop` before building;
+with Docker Desktop already running, the run needs about 4 GB of free memory (the six services peaked at 2.4 GB together; Kafka, Redis, Postgres and the console consumers run in Docker Desktop, whose VM peaked at 3.1 GB).
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\e2e-order.ps1
+powershell -ExecutionPolicy Bypass -File scripts\e2e-order.ps1 -Postgres
+```
+
+`-Postgres` runs order-service, payment-service and inventory-service, the three
+it restarts, on Postgres (the others stay on H2: they are never restarted) and
+adds the two force-kills of order-service. It needs ports 8080 to 8085, 9092 and
+6379 free (`BASKETRY_REDIS_PORT` instead of 6379 if set; with `-Postgres` also
+5432, or `BASKETRY_POSTGRES_PORT`), uses its own Compose project
+(`basketry-e2e-order`; the ports are the same, so still run one script at a
+time), and exits with 6 if this README no longer has the exact commands it runs.
+A run takes about 6 minutes, 8 with `-Postgres` (measured: 339 s and 472 s, the jars already built; a fresh build adds about a minute).
+Its logs go to `build\e2e\order`.

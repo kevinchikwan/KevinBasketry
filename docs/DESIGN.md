@@ -2548,7 +2548,23 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   record in catalog-service's own dead-letter topic, the Redis key prefix, TTLs
   and policy, and a Redis outage (`-Postgres` adds a forced restart of
   catalog-service with an event published while it is down: the group must be
-  picked back up from its committed offset).
+  picked back up from its committed offset). `scripts/e2e-order.ps1` runs the
+  checkout saga across all six services with the README's commands: two
+  merchants succeeding (with the commission in `order.succeeded`), a replay, a
+  price change, a decline, a shortage that refunds both merchants, a malformed
+  result in order-service's dead-letter topic, payment-service down past the
+  deadline (and the reopen when its late charges arrive), and inventory-service
+  down past the deadline (the order stays `FAILING` while it is down, the charge
+  is refunded and the line's release requested meanwhile; once it is back the
+  line is released, the stock is back and the order `FAILED`; the late reserve
+  was answered `RELEASED_BEFORE_RESERVE` by inventory-service's tombstone, or
+  `reserved` if the other order happens). `-Postgres` adds two force-kills of
+  order-service with an order in flight, one restarted after the old session
+  expired and one within about 5 s: the queued results must be applied within
+  the startup grace, and the consumer group must rejoin within 50 s. A shorter
+  deadline, timer interval and resend interval are passed on order-service's
+  command line. Not covered live: one merchant declining while another is
+  charged, a leg going `STUCK`, and a late `reserved` on a `TIMED_OUT` line.
 - On Postgres, merchant-service's row-lock reads wait at most 5 s for another
   transaction's lock, then answer 503 `MERCHANT_BUSY` (Postgres would otherwise
   wait forever).

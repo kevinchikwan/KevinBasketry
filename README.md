@@ -22,10 +22,12 @@ and `payment-service`, with its Kafka requests, results and dead-letter topics.
 as the gate, Redis as the atomic pre-check), its REST API and its Kafka side.
 `catalog-service` has its products, the Redis listing cache, the stock-row
 outbox to inventory-service, public reads, JWT-secured merchant writes and its
-`merchant.status.changed` consumer. identity-service, payment-service,
-inventory-service and catalog-service are done apart from items that belong to
-deployment; merchant-service still has one open question (the commission rate
-order-service needs, DESIGN.md Section 6).
+`merchant.status.changed` consumer. `order-service` runs the checkout saga:
+the checkout with its idempotency key, the coordinator that decides each order
+under its row lock, the timer with its deadline and compensation resends, the
+reads for buyer, merchant and Admin, and an end-to-end check across all six
+services. All six built services are done apart from items that belong to
+deployment.
 [`services/README.md`](services/README.md) has the status of every service and
 how to run the end-to-end checks.
 
