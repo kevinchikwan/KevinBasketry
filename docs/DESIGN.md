@@ -919,6 +919,12 @@ row lock:
 - **Startup grace.** For 60 s after the service starts, the timer does nothing,
   so an order whose results are still queued in Kafka after a restart is not
   failed before the listeners have read them. The listeners run from the start.
+  The grace (60 s) must stay longer than the consumers' session timeout (45 s,
+  the delay a restarted service can wait for a crashed member's session to end)
+  plus the time to start. If one is changed, change the other. The grace is
+  counted from when the timer starts (the SagaTimer bean is created), about the
+  same point as the service's startup but a few seconds earlier, so the real
+  margin is a little less than 60 s minus the rejoin.
 - Settings: `basketry.order.saga-deadline` (2 min), `basketry.order.timer-interval`
   (5 s), `basketry.order.startup-grace` (60 s),
   `basketry.order.compensation.resend-interval` (1 min),
@@ -2561,7 +2567,10 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
   `reserved` if the other order happens). `-Postgres` adds two force-kills of
   order-service with an order in flight, one restarted after the old session
   expired and one within about 5 s: the queued results must be applied within
-  the startup grace, and the consumer group must rejoin within 50 s. A shorter
+  the startup grace, and the consumer group must rejoin within 50 s, counted
+  from the service's startup (the Started log line). The grace counts from when
+  the timer starts, about the same point but a few seconds earlier, so the real
+  margin is a little less than 60 s minus the rejoin. A shorter
   deadline, timer interval and resend interval are passed on order-service's
   command line. Not covered live: one merchant declining while another is
   charged, a leg going `STUCK`, and a late `reserved` on a `TIMED_OUT` line.

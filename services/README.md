@@ -836,8 +836,7 @@ by card number and an order has one card; the shortage scenario covers the
 refund path, the tests the rest); a leg going `STUCK` after 3 resends
 (`SagaTimerTests` only); and a late `reserved` on a `TIMED_OUT` line
 (inventory-service has answered the late reserve `RELEASED_BEFORE_RESERVE` in
-every run, and no test sends a `reserved` to a timed-out line yet:
-`SagaDecisionTests` sends `declined` and `reservation-failed` to one).
+every run; `SagaResultTableTests` only).
 
 order-service runs with `--basketry.order.saga-deadline=30s`,
 `--basketry.order.timer-interval=1s` and

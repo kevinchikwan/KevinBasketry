@@ -90,9 +90,8 @@
         Kafka listener tests cover the mixed decline);
       - a leg going STUCK after 3 resends: SagaTimerTests only;
       - a late reserved on a TIMED_OUT line: inventory-service answered the
-        late reserve RELEASED_BEFORE_RESERVE in every run so far, and no test
-        sends a reserved to a timed-out line yet (SagaDecisionTests sends
-        declined and reservation-failed to one).
+        late reserve RELEASED_BEFORE_RESERVE in every run so far;
+        SagaResultTableTests only.
 
     Run settings, as order-service command-line arguments (never a code
     change): --basketry.order.saga-deadline=30s, --basketry.order.timer-interval=1s,
