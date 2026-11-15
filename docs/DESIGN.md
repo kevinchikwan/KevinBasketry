@@ -2367,7 +2367,7 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
 | Framework | **Spring Boot 4.1** | Current stable line, built on Spring Framework 7; officially supports Java 25. Consistent across all 9 services |
 | Messaging | **Apache Kafka** | Event transport for the orchestrated checkout saga (Section 4/5) and read-model projections |
 | Caching / atomic ops | **Redis** | Two specific uses, not general-purpose caching everywhere: (1) atomic stock decrement in `inventory-service` to prevent overselling under concurrent checkouts, (2) read-through cache for `catalog-service`'s product listings, which are read far more often than written |
-| Containerization | **Docker** | Every service ships a Dockerfile; Kafka, Redis, and Postgres (one database per service) run via Docker Compose for local dev |
+| Containerization | **Docker** | Kafka, Redis, and Postgres (one database per service) run via Docker Compose for local dev. A Dockerfile per service is planned; none exists yet |
 | Orchestration | **Kubernetes (k3s)** | Manifests for Deployments, Services, ConfigMaps, Secrets, and Ingress — real K8s objects, portable to a managed cluster (EKS) later without rewriting |
 | Cloud | **AWS** | Single free-tier-eligible EC2 instance running k3s; see below |
 | Frontend | **React + TypeScript** | Three separate apps — Buyer, Merchant, Admin (Section 1) |
