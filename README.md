@@ -249,6 +249,7 @@ one AWS EC2 instance.
   status table, and the end-to-end scripts.
 - [`docs/checkout-saga.mermaid`](docs/checkout-saga.mermaid): the full saga
   diagram.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md): what is built and what is next.
 
 ## License
 
