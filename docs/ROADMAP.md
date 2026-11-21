@@ -8,15 +8,15 @@ Status as of 19 Nov 2026. One checkbox per small commit; each should fit in a da
 
 ## A. promotion-service
 - [x] A1 Design answered: DESIGN and REQUIREMENTS updated (docs only)
-- [ ] A2 Empty service: module, port 8086, database promotion, Compose and README tables, health check
-- [ ] A3 Coupon table (Flyway) and the code and amount rules
+- [x] A2 Empty service: module, port 8086, database promotion, Compose and README tables, health check
+- [ ] A3 Coupon table (Flyway) and the code and amount rules; FlywayWiringTests then expects V1, and spring-boot-starter-data-jpa comes in
 - [ ] A4 Discount maths: percentage, fixed with cap, split between merchants, largest-remainder rounding, random-cart test
 - [ ] A5 Pricing service: expired, inactive and not-applicable coupons refused with a reason
-- [ ] A6 Internal pricing endpoint with the shared key
-- [ ] A7 Create, deactivate and list coupons (Merchant and Admin)
-- [ ] A8 order.succeeded consumer and the usage count
+- [ ] A6 Internal pricing endpoint with the shared key (copy order-service's InternalApiKey: whitespace stripped, at least 32 characters, unset means a WARN and every call refused)
+- [ ] A7 Create, deactivate and list coupons (Merchant and Admin); the strict JSON settings (no scalar coercion, strict strings) from the first endpoint
+- [ ] A8 order.succeeded consumer and the usage count: one group, promotion-service (listeners with idIsGroup = false, and the one-group test from order-service's ResultListenerKafkaTests); copy the corrected isDatabaseFailure comment and the fixed TransactionBoundaryTests (calls counted when they return)
 - [ ] A9 order-service: PromotionClient and CouponValidator, including a fully comped order: the body rule becomes expectedTotal >= 0 (and the coupon code normalised before the fingerprint), Amounts throws on a negative net, and zero-leg tests for the saga, the endpoint, order.succeeded (every merchant in the cart) and e2e; the buyer order view gains subtotal and discount per merchant and lists comped merchants (amount 0.00, built from their lines)
-- [ ] A10 e2e: merchant coupon, platform coupon split, comped order
+- [ ] A10 e2e: merchant coupon, platform coupon split, comped order; the -Postgres run needs BASKETRY_PROMOTION_DB_PASSWORD = New-Secret, as the other databases have
 
 ## B. conversation-service
 - [ ] B1 Empty service, thread and message tables

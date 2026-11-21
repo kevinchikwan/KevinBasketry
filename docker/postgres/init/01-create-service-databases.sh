@@ -23,3 +23,4 @@ create_service_database inventory "$BASKETRY_INVENTORY_DB_PASSWORD"
 create_service_database catalog "$BASKETRY_CATALOG_DB_PASSWORD"
 # order-service's database and user are "orders": ORDER is an SQL keyword.
 create_service_database orders "$BASKETRY_ORDER_DB_PASSWORD"
+create_service_database promotion "$BASKETRY_PROMOTION_DB_PASSWORD"

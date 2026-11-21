@@ -98,6 +98,7 @@ services:
       BASKETRY_INVENTORY_DB_PASSWORD: ${BASKETRY_INVENTORY_DB_PASSWORD:-local-dev-only-inventory}
       BASKETRY_CATALOG_DB_PASSWORD: ${BASKETRY_CATALOG_DB_PASSWORD:-local-dev-only-catalog}
       BASKETRY_ORDER_DB_PASSWORD: ${BASKETRY_ORDER_DB_PASSWORD:-local-dev-only-orders}
+      BASKETRY_PROMOTION_DB_PASSWORD: ${BASKETRY_PROMOTION_DB_PASSWORD:-local-dev-only-promotion}
     healthcheck:
       # Over TCP on purpose: while the init script runs, Postgres listens only on
       # its socket, so a socket check could pass before the databases exist.

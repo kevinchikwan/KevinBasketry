@@ -1,0 +1,30 @@
+server:
+  # Fixed port map in services/README.md (checked by ApplicationFileTests).
+  port: 8086
+
+spring:
+  application:
+    name: promotion-service
+
+  # Default: in-memory H2 in PostgreSQL mode, emptied on every restart. The
+  # "postgres" profile (application-postgres.yml) keeps the data in PostgreSQL.
+  datasource:
+    url: jdbc:h2:mem:promotion;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    username: sa
+    password: ""
+
+  # Flyway owns the schema. There is no migration yet: the coupon table comes in
+  # ROADMAP A3. With an empty location Flyway only logs a WARN (FlywayWiringTests).
+  flyway:
+    locations: classpath:db/migration
+
+# No endpoint yet. The web server exists for the health endpoint, which shows
+# no details (no database or disk information).
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never

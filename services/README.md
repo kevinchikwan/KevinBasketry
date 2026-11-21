@@ -12,7 +12,7 @@ they talk to each other.
 | `inventory-service` | 8083 | Done (deployment items open) |
 | `payment-service` | 8084 | Done (deployment items open) |
 | `order-service` | 8085 | Done (deployment items open) |
-| `promotion-service` | 8086 | Not started |
+| `promotion-service` | 8086 | In progress: empty service, health endpoint only (ROADMAP A2) |
 | `conversation-service` | 8087 | Not started |
 | `platform-service` | 8088 | Not started |
 
@@ -48,7 +48,8 @@ missing, and catalog-service fills its cache again as listings are read. It runs
 with 64 MB and `volatile-lru`: when full, it evicts cached listing pages (they
 have a TTL) and never a stock counter (no TTL; DESIGN.md Section 7).
 
-All six services also run without Kafka. order-service: a checkout is still
+promotion-service does not use Kafka yet (its `order.succeeded` consumer is
+ROADMAP A8). The six other services also run without Kafka. order-service: a checkout is still
 accepted, and its requests wait in its outbox until the broker is back (a
 checkout does need identity-service, catalog-service and merchant-service: if
 one is down, it is refused with a 503 and nothing is stored). Its result
@@ -446,15 +447,15 @@ the first start.
   ```
 
   After stopping `bootRun`, check that no JVM is still holding the port
-  (8080 to 8085); stop it if there is.
+  (8080 to 8086); stop it if there is.
 
 | Variable | Default (local only) | Used by |
 |---|---|---|
 | `BASKETRY_POSTGRES_HOST` | `localhost` | every service |
 | `BASKETRY_POSTGRES_PORT` | `5432` | Compose and every service |
-| `BASKETRY_DB_USERNAME` | `identity` / `merchant` / `payment` / `inventory` / `catalog` / `orders` | each service |
-| `BASKETRY_DB_PASSWORD` | `local-dev-only-identity` / `local-dev-only-merchant` / `local-dev-only-payment` / `local-dev-only-inventory` / `local-dev-only-catalog` / `local-dev-only-orders` | each service |
-| `BASKETRY_IDENTITY_DB_PASSWORD`, `BASKETRY_MERCHANT_DB_PASSWORD`, `BASKETRY_PAYMENT_DB_PASSWORD`, `BASKETRY_INVENTORY_DB_PASSWORD`, `BASKETRY_CATALOG_DB_PASSWORD`, `BASKETRY_ORDER_DB_PASSWORD` | the same six values | Compose's init script |
+| `BASKETRY_DB_USERNAME` | `identity` / `merchant` / `payment` / `inventory` / `catalog` / `orders` / `promotion` | each service |
+| `BASKETRY_DB_PASSWORD` | `local-dev-only-identity` / `local-dev-only-merchant` / `local-dev-only-payment` / `local-dev-only-inventory` / `local-dev-only-catalog` / `local-dev-only-orders` / `local-dev-only-promotion` | each service |
+| `BASKETRY_IDENTITY_DB_PASSWORD`, `BASKETRY_MERCHANT_DB_PASSWORD`, `BASKETRY_PAYMENT_DB_PASSWORD`, `BASKETRY_INVENTORY_DB_PASSWORD`, `BASKETRY_CATALOG_DB_PASSWORD`, `BASKETRY_ORDER_DB_PASSWORD`, `BASKETRY_PROMOTION_DB_PASSWORD` | the same seven values | Compose's init script |
 | `BASKETRY_POSTGRES_ADMIN_PASSWORD` | `local-dev-only-admin` (user `postgres`) | Compose |
 | `BASKETRY_REDIS_HOST` | `localhost` | inventory-service, catalog-service |
 | `BASKETRY_REDIS_PORT` | `6379` | Compose, inventory-service, catalog-service |
@@ -468,38 +469,24 @@ The defaults are for local development only, and a service logs a WARN at
 startup when it uses one. Each service has its own database and user, and no
 user can connect to another service's database. The init script
 (`docker/postgres/init`) runs only when the Postgres volume is empty: after
-changing it or a Compose password, run `docker compose down -v`.
+changing a Compose password, run `docker compose down -v`.
 
-**The `inventory` database is new** (as `payment` was before it). A Postgres
-volume created before it has no `inventory` database or user, so
-inventory-service cannot connect on Postgres. Either run `docker compose down -v`
-once and start Compose again, which **also wipes Kafka's data** and every other
-service's (see Restarting), so restart the ones running on H2 too; or, keeping
-all data, create just the new database and user in the running container
-(change the password if you overrode `BASKETRY_INVENTORY_DB_PASSWORD`):
-
-```
-docker compose exec postgres psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE inventory LOGIN PASSWORD 'local-dev-only-inventory';" -c "CREATE DATABASE inventory OWNER inventory;" -c "REVOKE CONNECT, TEMPORARY ON DATABASE inventory FROM PUBLIC;"
-```
-
-This does what the init script would have done for `inventory`. A volume that
-also predates `payment` needs the same three statements for `payment`.
-
-**The `catalog` database is new too.** The same choice: `docker compose down -v`
-(wiping everything), or, keeping all data, create it in the running container
-(change the password if you overrode `BASKETRY_CATALOG_DB_PASSWORD`):
+**A Postgres volume older than a service's database** has no database or user
+for it, so that service cannot connect on Postgres. `payment`, `inventory`,
+`catalog`, `orders` (order-service's; `order` is an SQL keyword) and
+`promotion` were each added after the first volumes were made. Keeping all
+data, create whichever are missing in the running container, from PowerShell at
+the repo root; this does what the init script would have done, and skips a
+database that already exists (if you overrode a `BASKETRY_<NAME>_DB_PASSWORD`,
+use your password instead of the default):
 
 ```
-docker compose exec postgres psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE catalog LOGIN PASSWORD 'local-dev-only-catalog';" -c "CREATE DATABASE catalog OWNER catalog;" -c "REVOKE CONNECT, TEMPORARY ON DATABASE catalog FROM PUBLIC;"
-```
-
-**The `orders` database is new too** (order-service's; `order` is an SQL keyword).
-The same choice: `docker compose down -v` (wiping everything), or, keeping all
-data, create it in the running container (change the password if you overrode
-`BASKETRY_ORDER_DB_PASSWORD`):
-
-```
-docker compose exec postgres psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE orders LOGIN PASSWORD 'local-dev-only-orders';" -c "CREATE DATABASE orders OWNER orders;" -c "REVOKE CONNECT, TEMPORARY ON DATABASE orders FROM PUBLIC;"
+foreach ($name in 'payment', 'inventory', 'catalog', 'orders', 'promotion') {
+    $exists = docker compose exec -T postgres psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$name'"
+    if ($exists -ne '1') {
+        docker compose exec -T postgres psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE $name LOGIN PASSWORD 'local-dev-only-$name';" -c "CREATE DATABASE $name OWNER $name;" -c "REVOKE CONNECT, TEMPORARY ON DATABASE $name FROM PUBLIC;"
+    }
+}
 ```
 
 The Redis change to `volatile-lru` needs nothing: Redis keeps no data, so
