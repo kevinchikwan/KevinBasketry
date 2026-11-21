@@ -310,9 +310,14 @@ Explicitly out of scope for this version:
 - A merchant whose net amount owed (subtotal − discount) comes to zero is
   not charged at all (no zero-amount authorization), but their items
   still go through stock reservation like any other line.
+- A coupon is reusable until it expires or is deactivated: any number of
+  orders, by any number of buyers, may use it. "Used" means counted: each
+  successful order that carried the code adds one to the coupon's usage
+  count, which its owner (the merchant, or Admin for a platform coupon) can
+  see. The count never affects whether the coupon is accepted.
 - If the order fails (any merchant declines, triggering the all-or-nothing
-  rollback), the coupon is **not** considered used and the buyer can
-  retry with the same code.
+  rollback), the coupon is **not** counted, and the buyer can retry with the
+  same code.
 - A coupon past its expiry date, or deactivated, is rejected at checkout
   with a clear reason (not silently ignored).
 - **Who funds a platform coupon's discount is the merchant**, per the
@@ -387,8 +392,8 @@ above, is a failed order on its way to `FAILED`, not a third outcome.)
   line items.
 - An expired or deactivated coupon is rejected with a clear reason, not
   silently ignored or silently applied at zero discount.
-- A coupon used in a failed (and rolled back) order is not consumed —
-  it can be reused on a subsequent checkout attempt.
+- A coupon used in a failed (and rolled back) order is not counted, and it
+  can be used again on a subsequent checkout attempt.
 - A note the buyer addresses to Merchant A is visible to Merchant A and
   not to Merchant B, even when both are part of the same order.
 - A merchant's reply in a thread is visible to the buyer, and to no other

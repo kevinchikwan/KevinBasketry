@@ -40,8 +40,8 @@ the owning service's API):
 | `merchant-service` | Merchant profile, onboarding, commission rate, KYC | `identity-service` (creating merchant login); publishes `merchant.status.changed` (Section 5); serves `order-service` the live status and commission rate (`GET /internal/merchants`) |
 | `inventory-service` | Stock counts | consumes stock reserve/release request events (Section 5), Redis (atomic pre-check) |
 | `payment-service` | Deterministic authorization mock (card-number lookup table) | — (no outbound dependencies) |
-| `order-service` | Checkout orchestration, saga coordination (no cart state — cart is client-side) | `identity-service` (live buyer-active check at checkout), `catalog-service` (re-validation of every line), `merchant-service` (live status and commission rate), `promotion-service` (not yet: coupons are refused until it exists), publishes/consumes checkout events |
-| `promotion-service` | Coupons | consumes `OrderSucceeded` / `OrderFailed` events |
+| `order-service` | Checkout orchestration, saga coordination (no cart state — cart is client-side) | `identity-service` (live buyer-active check at checkout), `catalog-service` (re-validation of every line), `merchant-service` (live status and commission rate), `promotion-service` (prices a coupon per merchant: `POST /internal/coupons/price`), publishes/consumes checkout events |
+| `promotion-service` | Coupons and their usage counts | serves `order-service` a coupon's discount per merchant (`POST /internal/coupons/price`); consumes `OrderSucceeded` events (the usage count) |
 | `conversation-service` | Order-scoped message threads | `order-service` (validating order/merchant references) |
 | `platform-service` | Admin read-model: GMV, commission, order stats | consumes `OrderSucceeded` events (CQRS-style projection) |
 
@@ -690,18 +690,18 @@ CustomerOrder                   -- table customer_order (ORDER is an SQL keyword
   requestFingerprint            -- HMAC-SHA256 of the canonical request (below), hex
   status: PENDING | SUCCEEDED | FAILING | FAILED
   needsAttention: boolean       -- true exactly while a leg is STUCK
-  couponCode: nullable          -- always null until promotion-service exists
-  totalAmount: NUMERIC(12, 2)   -- the sum of the merchant charges' amounts
+  couponCode: nullable          -- the normalised code (trimmed, upper-case); null for no coupon
+  totalAmount: NUMERIC(12, 2)   -- the sum of the merchant charges' amounts; 0.00 for a fully comped order
   deadlineAt                    -- createdAt + the saga deadline (2 min)
   createdAt
   decidedAt                     -- set when status first leaves PENDING
   completedAt                   -- set when status becomes SUCCEEDED or FAILED; reset on a reopen
 
-MerchantCharge                  -- table merchant_charge; the charge leg, one per merchant in the order
+MerchantCharge                  -- table merchant_charge; the charge leg, one per merchant with a net amount above 0
   orderId (FK), merchantId      -- composite PK; payment-service's idempotency key
   subtotal: NUMERIC(12, 2)      -- the sum of the merchant's line amounts
-  discount: NUMERIC(12, 2)      -- 0.00 until promotion-service exists
-  amount: NUMERIC(12, 2)        -- subtotal - discount; what is charged
+  discount: NUMERIC(12, 2)      -- promotion-service's discount for this merchant; 0.00 without a coupon
+  amount: NUMERIC(12, 2)        -- subtotal - discount, above 0; what is charged
   commissionRate: NUMERIC(5, 2) -- snapshot from merchant-service at checkout
   commission: NUMERIC(12, 2)    -- amount x commissionRate / 100, HALF_UP, scale 2
   status: REQUESTED | CHARGED | DECLINED | TIMED_OUT | REFUND_REQUESTED | REFUNDED | STUCK
@@ -742,7 +742,8 @@ open during a call to another service.
    the same fingerprint is answered as it stands now (200, Section 3); the same
    key with another fingerprint is 409 `IDEMPOTENCY_KEY_REUSED`. Nothing below
    runs again for a replay.
-5. **Three synchronous calls**, then the cart rules. First, the internal key
+5. **Three synchronous calls**, then the cart rules, then (only with a coupon)
+   a fourth call to price the coupon, then the price check. First, the internal key
    must be configured, else 503 `INTERNAL_API_KEY_NOT_CONFIGURED` before any
    call. It is checked here, after the idempotency lookup, because a replay
    calls nothing and is still answered without the key.
@@ -773,13 +774,19 @@ open during a call to another service.
      `PENDING` stock row is not refused: its reservation fails with
      `UNKNOWN_PRODUCT`. Stock itself is not checked here; the reservation
      decides it.
+   - **The coupon** (only when the body has one, and only once the cart rules
+     pass): promotion-service `POST /internal/coupons/price` with the normalised
+     code and every merchant's subtotal, in cart order (Coupons, below). A 409
+     from it is 409 `COUPON_REFUSED` with its `reason`. Anything else that is
+     not a valid answer is 503 `PROMOTION_UNAVAILABLE` (Coupons, below).
    - **The price.** The server's total (below) must equal the body's
      `expectedTotal` (numerically, so `13.5` equals `13.50`), else 409
      `PRICE_CHANGED` with every line's current price and the current total.
      FR-B12: the buyer is never charged a total that was not shown.
 6. **One transaction**: the order (`PENDING`), its charge legs and lines (all
-   `REQUESTED`), and one outbox row per request: a charge per merchant, a
-   reserve per line. Then 202 (Section 3); the relay publishes the requests.
+   `REQUESTED`), and one outbox row per request: a charge per merchant with a
+   net amount above 0, a reserve per line (every line, including those of a
+   merchant with no leg). Then 202 (Section 3); the relay publishes the requests.
 
 A checkout refused at step 5 (400, 403, 409 or 503) stores nothing, so a retry
 with the same Idempotency-Key runs again from step 1. Two concurrent first
@@ -788,8 +795,9 @@ requests with one key both run step 5; the second insert fails on the unique
 winner's order (200, or 409 if the fingerprint differs), as in payment-service.
 
 **The fingerprint** is HMAC-SHA256 under `BASKETRY_ORDER_FINGERPRINT_KEY` of a
-canonical form of the body: the lines sorted by `productId`, the coupon code,
-the card number and `expectedTotal` at scale 2. It is keyed because a plain
+canonical form of the body: the lines sorted by `productId`, the coupon code
+**normalised** (trimmed, upper-cased with `Locale.ROOT`, so `save10` and
+`SAVE10` with one key are the same request, not a 409), the card number and `expectedTotal` at scale 2. It is keyed because a plain
 hash of a card number could be reversed by trying every number. The key has
 the internal key's rules: whitespace stripped, fewer than 32 characters fails
 startup, unset means a WARN at startup and every checkout refused (step 3).
@@ -797,32 +805,52 @@ Changing the key makes the replay of an earlier request a 409.
 
 **Amounts.** `lineAmount = unitPrice × quantity`, exact. A merchant's
 `subtotal` is the sum of its lines, `amount = subtotal − discount` (the
-discount is 0.00 until promotion-service exists), and `totalAmount` is the sum
-of the merchant amounts, so **the merchant charges always sum to the order
-total** (tested). The worst case fits every column: 100 lines × 1,000 units ×
+discount is promotion-service's for that merchant, 0.00 without a coupon), and
+`totalAmount` is the sum of the merchant amounts, so **the merchant charges
+always sum to the order total** (tested). A merchant whose `amount` is 0.00
+gets no charge leg; a negative `amount` cannot come from a valid answer (the
+client refuses a discount above the subtotal first), so `Amounts` throws on
+one rather than dropping the leg. A fully comped order has no legs and
+`totalAmount` 0.00. The worst case fits every column: 100 lines × 1,000 units ×
 99,999.99 = 9,999,999,000.00, below payment-service's maximum amount and
 `NUMERIC(12, 2)`'s 9,999,999,999.99.
 
 **Commission** (REQUIREMENTS Section 8): per merchant,
 `commission = amount × commissionRate / 100`, rounded HALF_UP to scale 2, on
-the amount actually charged (the subtotal after the discount; equal to the
-subtotal while coupons are refused). `commissionRate` is merchant-service's
+the amount actually charged (the subtotal after the discount; 0.00 for a
+merchant with no leg). `commissionRate` is merchant-service's
 rate at checkout, snapshotted on the leg, so a later change of the rate never
 alters an earlier order. It is recognised only on a `SUCCEEDED` order: it is
 published in `order.succeeded` (Section 5) and nowhere else.
 
-**Coupons.** promotion-service does not exist yet, so a `couponCode` with a
-value is a 400 `COUPONS_NOT_SUPPORTED`. The check sits behind a
-`CouponValidator` interface that promotion-service's client will implement. A
-merchant whose net comes to zero will then get no charge leg (Section 2,
-promotion-service), so the coordinator never assumes every merchant has one.
+**Coupons.** The body's `couponCode` is normalised (trimmed, upper-cased with
+`Locale.ROOT`) before the fingerprint; a code that is not then 4 to 32
+characters of `A-Z 0-9 _ -` is a 400 at the body, and promotion-service is
+never called for it. After the cart rules, `CouponValidator` (promotion-service's
+client) sends `POST /internal/coupons/price` with the internal key, the code and
+`merchants: [{merchantId, subtotal}]` for every merchant in the cart, in cart
+order (Section 3, promotion-service). Its answer is checked before it is used:
+
+- a 409 with `COUPON_NOT_FOUND`, `COUPON_EXPIRED`, `COUPON_INACTIVE` or
+  `COUPON_NOT_APPLICABLE` is 409 `COUPON_REFUSED` with that `reason`;
+- promotion-service down (timeout, connection failure, 5xx, 401, any status it
+  never sends for a valid call) or an invalid answer (a merchant missing or not
+  sent, a discount negative, above that merchant's subtotal, or with more than
+  2 decimal places, a field missing or wrongly typed) is 503
+  `PROMOTION_UNAVAILABLE`, logged as an ERROR and never guessed. Connect 2 s,
+  read 5 s, no retry inside the request, as for the other calls.
+
+Either way nothing is stored. A merchant whose net comes to zero gets no
+charge leg but keeps its reservations (Section 2, promotion-service), so the
+coordinator never assumes every merchant has one; an order whose every
+merchant nets zero (fully comped) succeeds on its reservations alone.
 
 **Order status:**
 
 | Status | Meaning | Final |
 |---|---|---|
 | `PENDING` | Results outstanding, none negative | no |
-| `SUCCEEDED` | Every charge leg `CHARGED` and every line `RESERVED` | yes |
+| `SUCCEEDED` | Every charge leg `CHARGED` (vacuously true for an order with none) and every line `RESERVED` | yes |
 | `FAILING` | Failure decided; compensations or results still outstanding | no |
 | `FAILED` | Failure decided and every leg settled (below) | yes, unless reopened |
 
@@ -982,18 +1010,52 @@ order 7. Restart everything together on H2 (Section 7).
 ```
 Coupon
   id (PK)
-  code (unique)
+  code (unique)                  -- normalised: trimmed, upper-case (Locale.ROOT); 4-32 of A-Z 0-9 _ -
   scope: MERCHANT | PLATFORM
   merchantId: nullable           -- set when scope = MERCHANT
   discountType: PERCENTAGE | FIXED
-  discountValue: BigDecimal
-  expiryDate
+  discountValue: NUMERIC(12, 2)  -- PERCENTAGE 0.01-100.00; FIXED above 0, at most 9,999,999,999.99
+  expiresAt: Instant (UTC)       -- expired when now >= expiresAt
   active: boolean
+
+CouponUsage                      -- one row per counted order.succeeded
+  eventId (PK)                   -- the event's eventId: a redelivery inserts nothing
+  couponId (FK), orderId, occurredAt
 ```
-Coupon "used" state is derived from consumed `OrderSucceeded` events, not
-a flag set optimistically at checkout time — this is what makes FR
-"a coupon in a failed order is not consumed" correct by construction
-rather than by remembering to roll it back.
+**Codes.** A code is case-insensitive: it is normalised (trimmed, upper-cased
+with `Locale.ROOT`) on creation, on pricing and in order-service before the
+fingerprint, and it is unique on the normalised form. Merchant and platform
+coupons share **one namespace**, so a merchant can take a code Admin later
+wants (or another merchant's); this is accepted, and creating a taken code is
+a 409.
+
+**"Used" means counted, not consumed.** A coupon is reusable until it expires
+or is deactivated (REQUIREMENTS Section 9). Its usage count is the number of
+`CouponUsage` rows, written from consumed `order.succeeded` events that carry
+its code, deduplicated by `eventId`. The count is shown to the coupon's owner
+and has **no effect on validation**. Nothing is written at checkout time, so a
+coupon in a failed order is not counted by construction rather than by
+remembering to roll a counter back.
+
+**Amount rules.** All money at scale 2.
+
+- *`PERCENTAGE`* (0.01 to 100.00): per eligible merchant,
+  `discount_m = subtotal_m × value / 100`, rounded HALF_UP to 2 places. It
+  never exceeds the subtotal; at 100.00 every eligible merchant nets zero.
+- *`FIXED`* (above 0, at most 2 decimal places, at most 9,999,999,999.99,
+  payment-service's maximum amount, `ChargeCommand.MAX_AMOUNT`): capped and
+  split as below.
+- *Expiry:* `expiresAt` is an instant in UTC, the end exclusive: a coupon is
+  expired when `now >= expiresAt`.
+- *Eligible merchants:* a merchant coupon applies only to its own merchant
+  (every other merchant's discount is 0.00); a platform coupon applies to
+  every merchant in the cart.
+
+**Refusals** (each a 409 from `POST /internal/coupons/price`, checked in this
+order): `COUPON_NOT_FOUND` (no coupon with the normalised code),
+`COUPON_INACTIVE` (deactivated), `COUPON_EXPIRED`, `COUPON_NOT_APPLICABLE` (a
+merchant coupon whose merchant is not in the cart). A platform coupon is always
+applicable.
 
 **`FIXED` coupons — capping and splitting:**
 
@@ -1508,12 +1570,15 @@ account); identity-service never issues another, so any other is a 401.
     ```
     `lines`: 1 to 100, each `productId` a positive whole number and `quantity`
     a whole number from 1 to 1,000 (inventory-service's limit); a repeated
-    `productId` is a 400. `couponCode`: absent or `null`; a value is a 400
-    `COUPONS_NOT_SUPPORTED` until promotion-service exists. `cardNumber`: a
+    `productId` is a 400. `couponCode`: absent, `null`, or a string that,
+    trimmed and upper-cased (`Locale.ROOT`), is 4 to 32 characters of
+    `A-Z 0-9 _ -`; anything else is a 400, and the normalised code is what the
+    fingerprint, promotion-service and the order see. `cardNumber`: a
     string of 12 to 19 ASCII digits (payment-service's rule, so a valid
-    checkout never sends a request it would dead-letter). `expectedTotal`: the
-    total the buyer was shown, a JSON number above 0 with at most 2 decimal
-    places, at most 9,999,999,999.99. No 400 ever quotes the card number.
+    checkout never sends a request it would dead-letter); still required for a
+    fully comped order, which sends it nowhere. `expectedTotal`: the
+    total the buyer was shown, a JSON number of 0 or more (0 only for a fully
+    comped order) with at most 2 decimal places, at most 9,999,999,999.99. No 400 ever quotes the card number.
     *(A real system would send a tokenized payment-method reference, never a
     raw card number.)*
   - **202** with `Location: /orders/{reference}` and the order (the buyer's
@@ -1526,10 +1591,14 @@ account); identity-service never issues another, so any other is a 401.
   - 409: `IDEMPOTENCY_KEY_REUSED` (same key, another body);
     `CART_NOT_PURCHASABLE` with `lines: [{productId, reason}]` for every refused
     line (`NOT_FOUND`, `OWN_PRODUCT`, `INACTIVE`, `MERCHANT_INACTIVE`,
-    `STOCK_ROW_UNAVAILABLE`); `PRICE_CHANGED` with `lines: [{productId,
-    unitPrice}]` and `total`, the current ones.
+    `STOCK_ROW_UNAVAILABLE`); `COUPON_REFUSED` with `reason` (`COUPON_NOT_FOUND`,
+    `COUPON_EXPIRED`, `COUPON_INACTIVE`, `COUPON_NOT_APPLICABLE`);
+    `PRICE_CHANGED` with `lines: [{productId, unitPrice}]` and `total`, the
+    current ones.
   - 503, nothing created: `IDENTITY_UNAVAILABLE`, `CATALOG_UNAVAILABLE`,
-    `MERCHANT_UNAVAILABLE` (a timeout, connection failure, 5xx, or a 401
+    `MERCHANT_UNAVAILABLE`, `PROMOTION_UNAVAILABLE` (also a discount that is
+    negative, above its merchant's subtotal, or for a merchant missing; Section
+    2, order-service, Coupons) (a timeout, connection failure, 5xx, or a 401
     meaning the API keys differ, logged as an ERROR; also any other status the
     service never sends for a valid call, and an answer that cannot be read, such
     as a missing or wrongly typed field, an unknown stock-row status, a price
@@ -1606,8 +1675,18 @@ account); identity-service never issues another, so any other is a 401.
 
 **promotion-service**
 - `POST /coupons` (Merchant — scope=MERCHANT, or Admin — scope=PLATFORM)
-- `GET /coupons/validate?code=&merchantIds=` — used synchronously during
-  checkout, before the saga starts
+- `POST /internal/coupons/price` (internal key; for order-service's checkout,
+  after the cart rules and before the price check, Section 2, order-service).
+  Body `{"code":"SAVE10", "merchants":[{"merchantId":3, "subtotal":25.50},
+  {"merchantId":5, "subtotal":10.00}]}`: the normalised code and every merchant
+  in the cart, in cart order (the order breaks largest-remainder ties). Answer
+  200 `{"merchants":[{"merchantId":3, "discount":2.55}, {"merchantId":5,
+  "discount":1.00}]}`, one entry for **every** merchant sent, in the same order,
+  0.00 where the coupon does not apply; each discount at scale 2, never above
+  that merchant's subtotal. A refusal is a 409 with `code` one of
+  `COUPON_NOT_FOUND`, `COUPON_INACTIVE`, `COUPON_EXPIRED`,
+  `COUPON_NOT_APPLICABLE` (Section 2, promotion-service). Nothing is written:
+  pricing a coupon does not count it.
 
 **conversation-service**
 - `POST /orders/{reference}/threads/{merchantCode}/messages`
@@ -1627,10 +1706,11 @@ See `checkout-saga.mermaid` for the full diagram. Summary:
    active (sync, live check — FR-A6; a deactivated buyer is rejected
    before anything else happens), then `catalog-service` and
    `merchant-service`: re-validate every line and read each merchant's live
-   status and commission rate (sync), then `order-service` →
-   `promotion-service`: validate coupon (sync, if present; until
-   promotion-service exists a coupon is refused with a 400). Any refusal or
-   unavailable service answers at once and creates nothing.
+   status and commission rate (sync), then, once the cart rules pass,
+   `order-service` → `promotion-service`: price the coupon per merchant (sync,
+   if present; `POST /internal/coupons/price`; a refusal is 409
+   `COUPON_REFUSED`). Any refusal or unavailable service answers at once and
+   creates nothing.
 3. `order-service` creates `Order` in `PENDING`, with its legs and one outbox
    row per request, in one transaction, and answers **202** with the order's
    `Location`; the Buyer app polls it. The relay then publishes, in
@@ -1651,9 +1731,10 @@ See `checkout-saga.mermaid` for the full diagram. Summary:
    Each result is applied under the order's row lock, so only one result
    of an order decides (Section 2, order-service).
    If **all** are positive (`MerchantCharged` + `StockReserved`): sets
-   `Order.status = SUCCEEDED`, publishes `OrderSucceeded`
-7. `promotion-service` and `platform-service` consume `OrderSucceeded`
-   independently and update their own state. `inventory-service` does
+   `Order.status = SUCCEEDED`, publishes `OrderSucceeded`. A fully comped
+   order has no charge requests, so its reservations alone decide it
+7. `promotion-service` (the coupon's usage count) and `platform-service`
+   consume `OrderSucceeded` independently and update their own state. `inventory-service` does
    **not** need to react further — the stock was already decremented at
    reservation time in step 5, which is the point of reserving eagerly
 
@@ -1678,7 +1759,7 @@ See `checkout-saga.mermaid` for the full diagram. Summary:
    confirmed), `order-service` sets `Order.status = FAILED`, publishes
    `OrderFailed`
 6. No consumer of `OrderFailed` needs to do anything further (no coupon
-   consumption, no platform projection) — the compensations in steps 3–4
+   count, no platform projection) — the compensations in steps 3–4
    already returned the system to its pre-checkout state, which is
    precisely why the all-or-nothing decision keeps the failure path
    conceptually simple even though it now has two kinds of compensation
@@ -1728,7 +1809,7 @@ overselling race window this design exists to close.
 | `order.stock.reservation-failed` | inventory-service | order-service | schemaVersion, eventId, orderId, productId, reasonCode, occurredAt |
 | `order.stock-release.requested` | order-service | inventory-service | schemaVersion, orderId, productId, quantity |
 | `order.stock.released` | inventory-service | order-service | schemaVersion, eventId, orderId, productId, occurredAt |
-| `order.succeeded` | order-service | promotion-service, platform-service | schemaVersion, eventId, orderId, orderReference, buyerAccountId, couponCode, totalAmount, merchants[] (with commission), items[], occurredAt |
+| `order.succeeded` | order-service | promotion-service, platform-service | schemaVersion, eventId, orderId, orderReference, buyerAccountId, couponCode, totalAmount, merchants[] (every merchant in the cart: subtotal, discount, net amount, commission), items[], occurredAt |
 | `order.failed` | order-service | *(none currently — reserved for future audit/notification use)* | schemaVersion, eventId, orderId, orderReference, reasons[], occurredAt; can repeat for one order (a reopen) |
 
 Every `order.*` topic has 3 partitions, replication factor 1 and default
@@ -2249,8 +2330,16 @@ inventory-service):
  "items":[{"productId":42, "merchantId":3, "quantity":3, "unitPrice":8.50, "lineAmount":25.50}],
  "occurredAt":"2026-11-13T10:00:00Z"}
 ```
-`merchants` lists one entry per charge leg; every money value is a JSON number
-at scale 2.
+`merchants` lists **every merchant in the cart**, in `merchantId` order, with
+its `subtotal`, `discount` and `amount` (the net), so the coupon's whole effect
+is in the event. `couponCode` is the normalised code, or `null`. A merchant
+with a charge leg is shown as above. A merchant with no leg (net 0.00) is
+derived from its lines: `subtotal` the sum of its line amounts, `discount`
+equal to it, `amount` 0.00, `commission` 0.00, and `commissionRate` and
+`transactionRef` `null` (nothing was charged, so no rate was applied). A fully
+comped order has `totalAmount` 0.00 and every merchant in that form. Every
+money value is a JSON number at scale 2. `schemaVersion` stays 1: no service
+consumes the event yet. The example above (no coupon) is the golden file's.
 
 **`order.failed`** (written in the transaction that makes the order `FAILED`;
 again after a reopen, with a new `eventId`):

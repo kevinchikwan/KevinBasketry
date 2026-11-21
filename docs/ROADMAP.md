@@ -7,7 +7,7 @@ Status as of 19 Nov 2026. One checkbox per small commit; each should fit in a da
 - [x] README as a portfolio page; CI runs the default build on every push
 
 ## A. promotion-service
-- [ ] A1 Design answered: DESIGN and REQUIREMENTS updated (docs only)
+- [x] A1 Design answered: DESIGN and REQUIREMENTS updated (docs only)
 - [ ] A2 Empty service: module, port 8086, database promotion, Compose and README tables, health check
 - [ ] A3 Coupon table (Flyway) and the code and amount rules
 - [ ] A4 Discount maths: percentage, fixed with cap, split between merchants, largest-remainder rounding, random-cart test
@@ -15,7 +15,7 @@ Status as of 19 Nov 2026. One checkbox per small commit; each should fit in a da
 - [ ] A6 Internal pricing endpoint with the shared key
 - [ ] A7 Create, deactivate and list coupons (Merchant and Admin)
 - [ ] A8 order.succeeded consumer and the usage count
-- [ ] A9 order-service: PromotionClient and CouponValidator, including a fully comped order
+- [ ] A9 order-service: PromotionClient and CouponValidator, including a fully comped order: the body rule becomes expectedTotal >= 0 (and the coupon code normalised before the fingerprint), Amounts throws on a negative net, and zero-leg tests for the saga, the endpoint, order.succeeded (every merchant in the cart) and e2e
 - [ ] A10 e2e: merchant coupon, platform coupon split, comped order
 
 ## B. conversation-service
