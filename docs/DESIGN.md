@@ -1633,11 +1633,17 @@ account); identity-service never issues another, so any other is a 401.
   of that merchant.
 - **What each reader sees.** Every money value as a JSON number keeping scale
   2.
-  - Buyer: `reference`, `status`, `totalAmount`, `couponCode`, `createdAt`,
-    `merchants: [{merchantId, amount, status, reasonCode}]` and
-    `lines: [{productId, merchantId, productName, unitPrice, quantity,
-    lineAmount, status, reasonCode}]`. No commission, no `transactionRef`, no
-    `needsAttention`. The order's status is shown as it is (`FAILING` is "failed
+  - Buyer: `reference`, `status`, `totalAmount`, `couponCode` (the normalised
+    code, or `null`), `createdAt`,
+    `merchants: [{merchantId, subtotal, discount, amount, status, reasonCode}]`
+    and `lines: [{productId, merchantId, productName, unitPrice, quantity,
+    lineAmount, status, reasonCode}]`. `merchants` lists **every merchant in the
+    order**, in `merchantId` order, so the buyer sees each discount (FR-B13). A
+    merchant whose lines were fully comped has no charge leg and is built from
+    its lines, as in `order.succeeded` (Section 5): `subtotal` the sum of its
+    line amounts, `discount` equal to it, `amount` 0.00, and `status` and
+    `reasonCode` `null` (nothing was charged). No commission, no
+    `transactionRef`, no `needsAttention`. The order's status is shown as it is (`FAILING` is "failed
     and being reversed", FR-B18; a late charge shows it again). A leg's status
     is shown as the buyer should read it: `STUCK` as the compensation still
     requested (`REFUND_REQUESTED`, `RELEASE_REQUESTED`), `TIMED_OUT` as `FAILED`
@@ -1650,7 +1656,8 @@ account); identity-service never issues another, so any other is a 401.
   - Admin: everything, with raw states: plus `buyerAccountId`, `needsAttention`,
     `deadlineAt`, `decidedAt`, `completedAt`, and for every leg its commission
     fields, `transactionRef`, `resends` and `compensationDueAt`, what repairing a
-    `STUCK` leg needs.
+    `STUCK` leg needs. The legs are shown as stored: a fully comped merchant has
+    no leg and is not added (its lines are there).
   - **A list item is a summary:** `reference`, `status`, `totalAmount` (for the
     merchant view, its own amount), `createdAt`, `lineCount` (for the merchant
     view, its own lines), and `needsAttention` for Admin only. The detail is at

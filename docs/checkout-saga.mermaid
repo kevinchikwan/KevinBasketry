@@ -23,19 +23,25 @@ sequenceDiagram
     CatalogSvc-->>OrderSvc: price, active, merchantActive, stockRow per product
     OrderSvc->>MerchantSvc: GET /internal/merchants?ids= (sync, internal key)
     MerchantSvc-->>OrderSvc: active, commissionRate per merchant
-    break a line not purchasable, or the total is not expectedTotal
-        OrderSvc-->>Buyer: 409 CART_NOT_PURCHASABLE or PRICE_CHANGED, nothing created
+    break a line not purchasable
+        OrderSvc-->>Buyer: 409 CART_NOT_PURCHASABLE, nothing created
     end
-    opt couponCode (refused with 400 until promotion-service exists)
-        OrderSvc->>PromoSvc: GET /coupons/validate (sync)
-        PromoSvc-->>OrderSvc: valid, discount amount
+    opt couponCode (normalised: trimmed, upper-case)
+        OrderSvc->>PromoSvc: POST /internal/coupons/price (sync, internal key): code, merchantId + subtotal per merchant, in cart order
+        PromoSvc-->>OrderSvc: discount per merchant (every merchant sent)
+        break coupon not found, expired, inactive or not applicable
+            OrderSvc-->>Buyer: 409 COUPON_REFUSED with reason, nothing created
+        end
     end
-    Note over OrderSvc,PromoSvc: any service unavailable: 503, nothing created
+    break the total is not expectedTotal
+        OrderSvc-->>Buyer: 409 PRICE_CHANGED, nothing created
+    end
+    Note over OrderSvc,PromoSvc: any service unavailable: 503, nothing created (promotion down or an invalid answer: PROMOTION_UNAVAILABLE)
 
     OrderSvc->>OrderSvc: one transaction: Order PENDING, legs, commission rate snapshot, outbox rows
     OrderSvc-->>Buyer: 202 Location /orders/{reference}
     Note over Buyer,OrderSvc: the Buyer app polls GET /orders/{reference} from here on
-    OrderSvc->>Kafka: relay publishes MerchantChargeRequested (per merchant)
+    OrderSvc->>Kafka: relay publishes MerchantChargeRequested (per merchant with a net amount above 0)
     OrderSvc->>Kafka: relay publishes StockReserveRequested (per product line)
 
     par For each merchant
@@ -60,10 +66,10 @@ sequenceDiagram
     Kafka->>OrderSvc: charge results + reservation results
     Note over OrderSvc: each result applied under the order's row lock, so one decides
 
-    alt all merchants charged AND all stock reserved
+    alt every charge leg charged (none for a fully comped order) AND all stock reserved
         OrderSvc->>OrderSvc: Order.status = SUCCEEDED
-        OrderSvc->>Kafka: publish OrderSucceeded (with commission per merchant)
-        Kafka->>PromoSvc: OrderSucceeded (mark coupon used)
+        OrderSvc->>Kafka: publish OrderSucceeded (every merchant: subtotal, discount, net, commission)
+        Kafka->>PromoSvc: OrderSucceeded (count the coupon's usage, deduplicated by eventId)
         Kafka->>PlatformSvc: OrderSucceeded (update GMV/commission projection)
         Note over InvSvc: no action needed - stock already<br/>committed at reservation time
     else at least one declined OR out of stock OR no result by the deadline (2 min)
