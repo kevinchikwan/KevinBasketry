@@ -690,7 +690,7 @@ CustomerOrder                   -- table customer_order (ORDER is an SQL keyword
   requestFingerprint            -- HMAC-SHA256 of the canonical request (below), hex
   status: PENDING | SUCCEEDED | FAILING | FAILED
   needsAttention: boolean       -- true exactly while a leg is STUCK
-  couponCode: nullable          -- the normalised code (trimmed, upper-case); null for no coupon
+  couponCode: nullable          -- the normalised code (stripped, upper-case); null for no coupon
   totalAmount: NUMERIC(12, 2)   -- the sum of the merchant charges' amounts; 0.00 for a fully comped order
   deadlineAt                    -- createdAt + the saga deadline (2 min)
   createdAt
@@ -796,7 +796,7 @@ winner's order (200, or 409 if the fingerprint differs), as in payment-service.
 
 **The fingerprint** is HMAC-SHA256 under `BASKETRY_ORDER_FINGERPRINT_KEY` of a
 canonical form of the body: the lines sorted by `productId`, the coupon code
-**normalised** (trimmed, upper-cased with `Locale.ROOT`, so `save10` and
+**normalised** (stripped, upper-cased with `Locale.ROOT`, so `save10` and
 `SAVE10` with one key are the same request, not a 409), the card number and `expectedTotal` at scale 2. It is keyed because a plain
 hash of a card number could be reversed by trying every number. The key has
 the internal key's rules: whitespace stripped, fewer than 32 characters fails
@@ -823,10 +823,10 @@ rate at checkout, snapshotted on the leg, so a later change of the rate never
 alters an earlier order. It is recognised only on a `SUCCEEDED` order: it is
 published in `order.succeeded` (Section 5) and nowhere else.
 
-**Coupons.** The body's `couponCode` is normalised (trimmed, upper-cased with
-`Locale.ROOT`) before the fingerprint; a code that is not then 4 to 32
-characters of `A-Z 0-9 _ -` is a 400 at the body, and promotion-service is
-never called for it. After the cart rules, `CouponValidator` (promotion-service's
+**Coupons.** The body's `couponCode` is normalised before the fingerprint,
+by promotion-service's rule (Section 2, promotion-service, Codes); a code the
+rule refuses is a 400 at the body, and promotion-service is never called for
+it. After the cart rules, `CouponValidator` (promotion-service's
 client) sends `POST /internal/coupons/price` with the internal key, the code and
 `merchants: [{merchantId, subtotal}]` for every merchant in the cart, in cart
 order (Section 3, promotion-service). Its answer is checked before it is used:
@@ -1010,7 +1010,7 @@ order 7. Restart everything together on H2 (Section 7).
 ```
 Coupon
   id (PK)
-  code (unique)                  -- normalised: trimmed, upper-case (Locale.ROOT); 4-32 of A-Z 0-9 _ -
+  code (unique)                  -- normalised: stripped, ASCII only, upper-case (Locale.ROOT); 4-32 of A-Z 0-9 _ -
   scope: MERCHANT | PLATFORM
   merchantId: nullable           -- set when scope = MERCHANT
   discountType: PERCENTAGE | FIXED
@@ -1022,9 +1022,15 @@ CouponUsage                      -- one row per counted order.succeeded
   eventId (PK)                   -- the event's eventId: a redelivery inserts nothing
   couponId (FK), orderId, occurredAt
 ```
-**Codes.** A code is case-insensitive: it is normalised (trimmed, upper-cased
-with `Locale.ROOT`) on creation, on pricing and in order-service before the
-fingerprint, and it is unique on the normalised form. Merchant and platform
+**Codes.** A code is case-insensitive: it is normalised on creation, on
+pricing and in order-service before the fingerprint, and it is unique on the
+normalised form. The rule, in this order: strip the whitespace
+(`String.strip()`, Unicode whitespace, not `trim()`); refuse any character
+outside ASCII `A-Z a-z 0-9 _ -`; upper-case with `Locale.ROOT`; refuse what is
+not then 4 to 32 characters. Checking before upper-casing refuses the
+characters that upper-case into ASCII (`ſ` to S, `ß` to SS, `ﬁ` to FI, `ı` to
+I). Each service has its own copy of the rule, and both are tested against
+the same expected answers, `docs/coupon-code-vectors.txt`. Merchant and platform
 coupons share **one namespace**, so a merchant can take a code Admin later
 wants (or another merchant's); this is accepted, and creating a taken code is
 a 409.
@@ -1571,8 +1577,9 @@ account); identity-service never issues another, so any other is a 401.
     `lines`: 1 to 100, each `productId` a positive whole number and `quantity`
     a whole number from 1 to 1,000 (inventory-service's limit); a repeated
     `productId` is a 400. `couponCode`: absent, `null`, or a string that,
-    trimmed and upper-cased (`Locale.ROOT`), is 4 to 32 characters of
-    `A-Z 0-9 _ -`; anything else is a 400, and the normalised code is what the
+    stripped (`String.strip()`), is only ASCII `A-Z a-z 0-9 _ -` and,
+    upper-cased (`Locale.ROOT`), 4 to 32 characters (the rule of Section 2,
+    promotion-service, Codes); anything else is a 400, and the normalised code is what the
     fingerprint, promotion-service and the order see. `cardNumber`: a
     string of 12 to 19 ASCII digits (payment-service's rule, so a valid
     checkout never sends a request it would dead-letter); still required for a

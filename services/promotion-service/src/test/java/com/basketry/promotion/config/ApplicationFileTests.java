@@ -23,4 +23,19 @@ class ApplicationFileTests {
 
         assertThat(application.getProperty("server.port")).isEqualTo("8086");
     }
+
+    /**
+     * Flyway owns the schema: Hibernate only validates it, and never holds a
+     * session open across a web request. Mutations: {@code ddl-auto: update};
+     * {@code open-in-view: true}.
+     */
+    @Test
+    void hibernateOnlyValidatesAndOpenInViewIsOff() {
+        YamlPropertiesFactoryBean yaml = new YamlPropertiesFactoryBean();
+        yaml.setResources(new ClassPathResource("application.yml"));
+        Properties application = yaml.getObject();
+
+        assertThat(application.getProperty("spring.jpa.hibernate.ddl-auto")).isEqualTo("validate");
+        assertThat(application.getProperty("spring.jpa.open-in-view")).isEqualTo("false");
+    }
 }

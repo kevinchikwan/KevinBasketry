@@ -26,7 +26,7 @@ sequenceDiagram
     break a line not purchasable
         OrderSvc-->>Buyer: 409 CART_NOT_PURCHASABLE, nothing created
     end
-    opt couponCode (normalised: trimmed, upper-case)
+    opt couponCode (normalised: stripped, upper-case)
         OrderSvc->>PromoSvc: POST /internal/coupons/price (sync, internal key): code, merchantId + subtotal per merchant, in cart order
         PromoSvc-->>OrderSvc: discount per merchant (every merchant sent)
         break coupon not found, expired, inactive or not applicable

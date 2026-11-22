@@ -15,10 +15,9 @@ repositories {
     mavenCentral()
 }
 
-// Only what the empty service uses (ROADMAP A2). JPA comes with the coupon table
-// (A3), security and the internal key with the pricing endpoint (A6), the
-// resource server with the coupon endpoints (A7), and Kafka with the
-// order.succeeded consumer (A8).
+// Only what the service uses so far (ROADMAP A3). Security and the internal key
+// come with the pricing endpoint (A6), the resource server with the coupon
+// endpoints (A7), and Kafka with the order.succeeded consumer (A8).
 dependencies {
     implementation(platform(SpringBootPlugin.BOM_COORDINATES))
     testImplementation(platform(SpringBootPlugin.BOM_COORDINATES))
@@ -26,6 +25,8 @@ dependencies {
     // The web server, for the health endpoint.
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
+    // The coupon table (Hibernate only validates it against Flyway's schema).
+    implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     // Flyway owns the schema (DESIGN.md Section 7); the starter brings JDBC and Hikari.
     implementation("org.springframework.boot:spring-boot-starter-flyway")
     // In-memory H2 by default; PostgreSQL with the "postgres" profile (DESIGN.md Section 7).

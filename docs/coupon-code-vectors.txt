@@ -1,0 +1,49 @@
+# Coupon code vectors: what the code rule (DESIGN.md Section 2,
+# promotion-service, Codes) gives for each input. promotion-service's
+# CouponCodeVectorTests reads this file, and order-service's copy of the rule
+# is tested against it too (ROADMAP A9). The rule is copied into each service;
+# the answers live only here. Change the rule only by changing this file first.
+#
+# The rule: strip (String.strip(): Unicode whitespace, not trim()), refuse any
+# character outside ASCII A-Z a-z 0-9 _ -, upper-case with Locale.ROOT, then
+# 4 to 32 characters.
+#
+# One vector a line: the input in double quotes, then the normalised code or
+# REFUSED, then an optional # comment. Inside the quotes everything is literal,
+# spaces included, except \uXXXX (that UTF-16 unit), \\ and \".
+
+# Accepted
+"SAVE10"                              SAVE10
+"save10"                              SAVE10      # case-insensitive
+"Save-10_x"                           SAVE-10_X
+"  save10 "                           SAVE10      # stripped
+"\u0009save10\u000A"                  SAVE10      # tab and newline are whitespace
+"\u2003SAVE10\u2003"                  SAVE10      # em space: strip() removes it, trim() does not
+"discount"                            DISCOUNT    # Locale.ROOT: Turkish would give D\u0130SCOUNT
+"ABCD"                                ABCD        # 4, the shortest
+"abcdefghijklmnopqrstuvwxyz012345"    ABCDEFGHIJKLMNOPQRSTUVWXYZ012345   # 32, the longest
+"____"                                ____
+"----"                                ----
+
+# Refused: length
+""                                    REFUSED
+"   "                                 REFUSED
+"abc"                                 REFUSED     # 3
+"  abc  "                             REFUSED     # 3 once stripped
+"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456"   REFUSED     # 33
+
+# Refused: characters
+"SAVE 10"                             REFUSED     # a space inside
+"SAVE.10"                             REFUSED
+"SAVE10!"                             REFUSED
+"\u0001SAVE10"                        REFUSED     # trim() removes U+0001, strip() does not
+"\u00A0SAVE10"                        REFUSED     # no-break space: neither removes it
+"SAVE10\u0000"                        REFUSED
+"SAV\u00C9"                           REFUSED     # E acute
+"\uFF33\uFF21\uFF36\uFF25"            REFUSED     # full-width SAVE
+
+# Refused: characters that upper-case into ASCII (checked before upper-casing)
+"\u017Fave10"                         REFUSED     # long s: SAVE10
+"stra\u00DFe"                         REFUSED     # sharp s: STRASSE
+"\uFB01ve10"                          REFUSED     # fi ligature: FIVE10
+"d\u0131scount"                       REFUSED     # dotless i: DISCOUNT
