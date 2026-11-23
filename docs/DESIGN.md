@@ -776,7 +776,7 @@ open during a call to another service.
      decides it.
    - **The coupon** (only when the body has one, and only once the cart rules
      pass): promotion-service `POST /internal/coupons/price` with the normalised
-     code and every merchant's subtotal, in cart order (Coupons, below). A 409
+     code and every merchant's subtotal, in merchantId order (Coupons, below). A 409
      from it is 409 `COUPON_REFUSED` with its `reason`. Anything else that is
      not a valid answer is 503 `PROMOTION_UNAVAILABLE` (Coupons, below).
    - **The price.** The server's total (below) must equal the body's
@@ -828,8 +828,10 @@ by promotion-service's rule (Section 2, promotion-service, Codes); a code the
 rule refuses is a 400 at the body, and promotion-service is never called for
 it. After the cart rules, `CouponValidator` (promotion-service's
 client) sends `POST /internal/coupons/price` with the internal key, the code and
-`merchants: [{merchantId, subtotal}]` for every merchant in the cart, in cart
-order (Section 3, promotion-service). Its answer is checked before it is used:
+`merchants: [{merchantId, subtotal}]` for every merchant in the cart, in
+ascending `merchantId` order. No cart order is needed: promotion-service breaks
+ties by `merchantId`, so the order sent never changes a discount (Section 3,
+promotion-service). Its answer is checked before it is used:
 
 - a 409 with `COUPON_NOT_FOUND`, `COUPON_EXPIRED`, `COUPON_INACTIVE` or
   `COUPON_NOT_APPLICABLE` is 409 `COUPON_REFUSED` with that `reason`;
@@ -1070,13 +1072,20 @@ applicable.
 - *Platform coupon:* the discount is first capped at the cart's total
   subtotal, then split between merchants in proportion to each
   merchant's subtotal (`exact_m = cappedDiscount × subtotal_m / cartSubtotal`).
-  Because of the cap, no merchant's share can exceed that merchant's
-  subtotal.
-- *Rounding (largest-remainder method):* floor each `exact_m` to the
-  cent, sum the floors, and give the leftover cents to the merchants with
-  the largest fractional remainders, one cent each. Ties go to the
-  merchant that appears first in the cart. The shares always sum exactly
-  to `cappedDiscount`.
+  Because of the cap, `exact_m` never exceeds that merchant's subtotal, and
+  rounding keeps it so: a share below its subtotal is floored at least a
+  cent below it, and a share equal to it (the cap equals the cart) has
+  nothing to round.
+- *Rounding (largest-remainder method), in whole pennies:* floor each
+  `exact_m` to the cent and sum the floors; the `k = cappedDiscount − sum`
+  cents left over are fewer than the merchants. Sort the merchants by their
+  remainder, largest first, comparing remainders **exactly** (as the
+  integers `cappedDiscount × subtotal_m mod cartSubtotal`, in pennies, never
+  as rounded decimals), and equal remainders by **ascending `merchantId`**;
+  the sort is stable, and the first `k` merchants in that order get one
+  cent each. So a merchant gets at most one cent, one whose remainder is
+  zero gets none, the shares always sum exactly to `cappedDiscount`, and
+  the order the merchants are sent in never changes a share.
 - *Zero net amount:* if a merchant's net amount owed
   (`subtotal_m − share_m`) is zero, that merchant gets **no payment leg**
   (no zero-amount authorization), but their stock-reservation leg still
@@ -1693,7 +1702,9 @@ account); identity-service never issues another, so any other is a 401.
   after the cart rules and before the price check, Section 2, order-service).
   Body `{"code":"SAVE10", "merchants":[{"merchantId":3, "subtotal":25.50},
   {"merchantId":5, "subtotal":10.00}]}`: the normalised code and every merchant
-  in the cart, in cart order (the order breaks largest-remainder ties). Answer
+  in the cart, in any order (equal largest remainders go to the lower
+  `merchantId`, so the order sent never changes a discount; order-service
+  sends them in `merchantId` order). Answer
   200 `{"merchants":[{"merchantId":3, "discount":2.55}, {"merchantId":5,
   "discount":1.00}]}`, one entry for **every** merchant sent, in the same order,
   0.00 where the coupon does not apply; each discount at scale 2, never above

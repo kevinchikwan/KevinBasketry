@@ -27,7 +27,7 @@ sequenceDiagram
         OrderSvc-->>Buyer: 409 CART_NOT_PURCHASABLE, nothing created
     end
     opt couponCode (normalised: stripped, upper-case)
-        OrderSvc->>PromoSvc: POST /internal/coupons/price (sync, internal key): code, merchantId + subtotal per merchant, in cart order
+        OrderSvc->>PromoSvc: POST /internal/coupons/price (sync, internal key): code, merchantId + subtotal per merchant, in merchantId order
         PromoSvc-->>OrderSvc: discount per merchant (every merchant sent)
         break coupon not found, expired, inactive or not applicable
             OrderSvc-->>Buyer: 409 COUPON_REFUSED with reason, nothing created

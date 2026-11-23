@@ -49,6 +49,15 @@ tasks.test {
     }
 }
 
+// DiscountCalculatorPropertyTests: -Ddiscount.seed=random runs 20,000 carts from a fresh seed, and
+// -Ddiscount.seed=<seed> replays one; without it, the fixed seeds. A chosen seed always reruns.
+tasks.withType<Test>().configureEach {
+    System.getProperty("discount.seed")?.let {
+        systemProperty("discount.seed", it)
+        outputs.upToDateWhen { false }
+    }
+}
+
 // The whole suite again, on a real PostgreSQL in a Testcontainers container
 // (support/PostgresContextCustomizerFactory). Needs Docker; not part of build or check.
 tasks.register<Test>("postgresTest") {
