@@ -70,6 +70,23 @@ public final class DiscountCalculator {
         if (discount == null || scope == null) {
             throw new IllegalArgumentException("A discount and a scope are needed.");
         }
+        Set<Long> merchantIds = checkCart(cart);
+        if (scope == CouponScope.MERCHANT && (ownerId == null || !merchantIds.contains(ownerId))) {
+            throw new IllegalArgumentException("A merchant coupon's merchant must be in the cart.");
+        }
+        if (scope == CouponScope.PLATFORM && ownerId != null) {
+            throw new IllegalArgumentException("A platform coupon has no merchant.");
+        }
+    }
+
+    /**
+     * The cart's own rules, which the pricing service checks before it looks the
+     * coupon up, so a bad cart is the caller's error whatever the code.
+     *
+     * @return the merchant ids in the cart
+     * @throws IllegalArgumentException for a missing or empty cart, an empty entry, or a merchant given twice
+     */
+    static Set<Long> checkCart(List<MerchantSubtotal> cart) {
         if (cart == null || cart.isEmpty()) {
             throw new IllegalArgumentException("A cart has at least one merchant.");
         }
@@ -82,12 +99,7 @@ public final class DiscountCalculator {
                 throw new IllegalArgumentException("Merchant " + merchant.merchantId() + " is in the cart twice.");
             }
         }
-        if (scope == CouponScope.MERCHANT && (ownerId == null || !merchantIds.contains(ownerId))) {
-            throw new IllegalArgumentException("A merchant coupon's merchant must be in the cart.");
-        }
-        if (scope == CouponScope.PLATFORM && ownerId != null) {
-            throw new IllegalArgumentException("A platform coupon has no merchant.");
-        }
+        return merchantIds;
     }
 
     private static boolean eligible(CouponScope scope, Long ownerId, MerchantSubtotal merchant) {

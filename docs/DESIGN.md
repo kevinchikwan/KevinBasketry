@@ -833,7 +833,7 @@ ascending `merchantId` order. No cart order is needed: promotion-service breaks
 ties by `merchantId`, so the order sent never changes a discount (Section 3,
 promotion-service). Its answer is checked before it is used:
 
-- a 409 with `COUPON_NOT_FOUND`, `COUPON_EXPIRED`, `COUPON_INACTIVE` or
+- a 409 with `COUPON_NOT_FOUND`, `COUPON_INACTIVE`, `COUPON_EXPIRED` or
   `COUPON_NOT_APPLICABLE` is 409 `COUPON_REFUSED` with that `reason`;
 - promotion-service down (timeout, connection failure, 5xx, 401, any status it
   never sends for a valid call) or an invalid answer (a merchant missing or not
@@ -1054,7 +1054,8 @@ remembering to roll a counter back.
   payment-service's maximum amount, `ChargeCommand.MAX_AMOUNT`): capped and
   split as below.
 - *Expiry:* `expiresAt` is an instant in UTC, the end exclusive: a coupon is
-  expired when `now >= expiresAt`.
+  expired when `now >= expiresAt`. A coupon truncates `expiresAt` to
+  microseconds when it is created, the precision both databases store.
 - *Eligible merchants:* a merchant coupon applies only to its own merchant
   (every other merchant's discount is 0.00); a platform coupon applies to
   every merchant in the cart.
@@ -1608,7 +1609,7 @@ account); identity-service never issues another, so any other is a 401.
     `CART_NOT_PURCHASABLE` with `lines: [{productId, reason}]` for every refused
     line (`NOT_FOUND`, `OWN_PRODUCT`, `INACTIVE`, `MERCHANT_INACTIVE`,
     `STOCK_ROW_UNAVAILABLE`); `COUPON_REFUSED` with `reason` (`COUPON_NOT_FOUND`,
-    `COUPON_EXPIRED`, `COUPON_INACTIVE`, `COUPON_NOT_APPLICABLE`);
+    `COUPON_INACTIVE`, `COUPON_EXPIRED`, `COUPON_NOT_APPLICABLE`);
     `PRICE_CHANGED` with `lines: [{productId, unitPrice}]` and `total`, the
     current ones.
   - 503, nothing created: `IDENTITY_UNAVAILABLE`, `CATALOG_UNAVAILABLE`,

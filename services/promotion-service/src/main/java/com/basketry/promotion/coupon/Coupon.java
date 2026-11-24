@@ -12,6 +12,7 @@ import jakarta.persistence.SequenceGenerator;
 import jakarta.persistence.Table;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 /**
  * A coupon (DESIGN.md Section 2, promotion-service). The constructor refuses a
@@ -19,7 +20,7 @@ import java.time.Instant;
  * {@link CouponCode}, the discount a {@link Discount}, and a merchant id is
  * given exactly for a merchant coupon. Never deleted; only {@link #deactivate()}
  * changes it after creation. Whether it has expired is the pricing's question
- * (ROADMAP A5), against its clock.
+ * (CouponPricingService), against its clock.
  */
 @Entity
 @Table(name = "coupon")
@@ -75,7 +76,9 @@ public class Coupon {
         this.merchantId = merchantId;
         this.discountType = discount.type();
         this.discountValue = discount.value();
-        this.expiresAt = expiresAt;
+        // TIMESTAMP WITH TIME ZONE keeps microseconds on H2 and on PostgreSQL, so the
+        // coupon in memory is the row pricing reads (ExpiryStorageTests).
+        this.expiresAt = expiresAt.truncatedTo(ChronoUnit.MICROS);
         this.active = true;
     }
 

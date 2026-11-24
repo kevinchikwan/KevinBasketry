@@ -43,6 +43,14 @@ class CouponTests {
                 .isInstanceOf(InvalidCouponException.class);
     }
 
+    /** Mutation: {@code expiresAt.truncatedTo(ChronoUnit.MILLIS)} (a precision the databases do not stop at). */
+    @Test
+    void theExpiryIsTruncatedToTheMicrosecond() {
+        Coupon coupon = new Coupon(CODE, PLATFORM, null, TEN_PERCENT, Instant.parse("2027-01-01T00:00:00.123456999Z"));
+
+        assertThat(coupon.getExpiresAt()).isEqualTo(Instant.parse("2027-01-01T00:00:00.123456Z"));
+    }
+
     /** Mutation: {@code expiresAt == null} dropped from the null check. */
     @Test
     void everyPartIsRequired() {
