@@ -1,6 +1,11 @@
 server:
   # Fixed port map in services/README.md (checked by ApplicationFileTests).
   port: 8086
+  tomcat:
+    # Off, as by default; stated so nobody turns it on to debug pricing. It
+    # would never log bodies, but its patterns can log headers (the internal key).
+    accesslog:
+      enabled: false
 
 spring:
   application:
@@ -22,8 +27,26 @@ spring:
   flyway:
     locations: classpath:db/migration
 
-# No endpoint yet. The web server exists for the health endpoint, which shows
-# no details (no database or disk information).
+  # Errors are returned as RFC 9457 problem details, never as stack traces.
+  mvc:
+    problemdetails:
+      enabled: true
+    # Never log request details (parameters, headers, so the internal key): set
+    # explicitly, so the rule does not depend on a default. The request object
+    # masks the coupon code and the subtotals (PriceRequest).
+    log-request-details: false
+
+  # As in order-service: a number like 1.5 sent for a whole-number field is a
+  # 400, never truncated, and a field takes only its own JSON type: "5" for a
+  # number is a 400, never converted. A repeated field and anything after the
+  # body are refused too (StrictJsonConfig).
+  jackson:
+    deserialization:
+      accept-float-as-int: false
+    mapper:
+      allow-coercion-of-scalars: false
+
+# The health endpoint only, with no details (no database or disk information).
 management:
   endpoints:
     web:
@@ -32,3 +55,11 @@ management:
   endpoint:
     health:
       show-details: never
+
+basketry:
+  internal:
+    # Shared key order-service presents on /internal/**. Never committed: comes
+    # from the environment (a Kubernetes Secret when deployed), the same variable
+    # the other services read. Unset = a WARN at startup and every internal call
+    # refused (401); set = at least 32 characters.
+    api-key: ${BASKETRY_INTERNAL_API_KEY:}

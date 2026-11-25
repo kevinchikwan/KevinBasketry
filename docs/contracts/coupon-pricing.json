@@ -1,0 +1,43 @@
+{
+  "about": "POST /internal/coupons/price (DESIGN.md Section 3, promotion-service): a request and every answer the endpoint gives for it. promotion-service's PricingContractTests posts the request and expects these answers, field by field and scale by scale; order-service's PromotionClient test (ROADMAP A9) reads the same file. Both find it from their module's directory. Change the contract only by changing this file first.",
+  "coupon": {
+    "code": "SAVE10",
+    "scope": "PLATFORM",
+    "discountType": "PERCENTAGE",
+    "discountValue": 10.00
+  },
+  "request": {
+    "code": "SAVE10",
+    "merchants": [
+      {"merchantId": 3, "subtotal": 25.50},
+      {"merchantId": 5, "subtotal": 10.00}
+    ]
+  },
+  "ok": {
+    "status": 200,
+    "body": {
+      "merchants": [
+        {"merchantId": 3, "discount": 2.55},
+        {"merchantId": 5, "discount": 1.00}
+      ]
+    }
+  },
+  "refusals": {
+    "COUPON_NOT_FOUND": {
+      "status": 409,
+      "body": {"title": "Conflict", "status": 409, "detail": "Coupon refused: COUPON_NOT_FOUND", "instance": "/internal/coupons/price", "code": "COUPON_NOT_FOUND"}
+    },
+    "COUPON_INACTIVE": {
+      "status": 409,
+      "body": {"title": "Conflict", "status": 409, "detail": "Coupon refused: COUPON_INACTIVE", "instance": "/internal/coupons/price", "code": "COUPON_INACTIVE"}
+    },
+    "COUPON_EXPIRED": {
+      "status": 409,
+      "body": {"title": "Conflict", "status": 409, "detail": "Coupon refused: COUPON_EXPIRED", "instance": "/internal/coupons/price", "code": "COUPON_EXPIRED"}
+    },
+    "COUPON_NOT_APPLICABLE": {
+      "status": 409,
+      "body": {"title": "Conflict", "status": 409, "detail": "Coupon refused: COUPON_NOT_APPLICABLE", "instance": "/internal/coupons/price", "code": "COUPON_NOT_APPLICABLE"}
+    }
+  }
+}

@@ -1712,7 +1712,33 @@ account); identity-service never issues another, so any other is a 401.
   that merchant's subtotal. A refusal is a 409 with `code` one of
   `COUPON_NOT_FOUND`, `COUPON_INACTIVE`, `COUPON_EXPIRED`,
   `COUPON_NOT_APPLICABLE` (Section 2, promotion-service). Nothing is written:
-  pricing a coupon does not count it.
+  pricing a coupon does not count it. The request and every answer are pinned
+  in `docs/contracts/coupon-pricing.json`, which order-service's client test
+  reads too.
+  - *Body rules*, all checked before any coupon is looked up and named at once
+    in a 400 (`violations`, never a value sent): `code` a JSON string, through
+    the code rule (a code the rule refuses is a 400, never `COUPON_NOT_FOUND`);
+    1 to 100 merchants, each once; `merchantId` a whole number above 0;
+    `subtotal` a JSON number above 0, at most 2 decimal places, at most
+    9,999,999,999.99. Strict JSON: no scalar coercion (`"3"` for a number),
+    no fraction for a whole number, an unknown field is a 400 that counts it
+    but never names it (a name could be a coupon code), a repeated field and
+    anything after the object are refused. A body over 64 KB is 413
+    `BODY_TOO_LARGE`, counted by the bytes read (chunked too), before the key
+    check. The controller reads the body itself, so Jackson's message, which
+    quotes the input, never reaches a log or a response.
+  - *Answers*: the 409 is `{"title":"Conflict","status":409,"detail":"Coupon
+    refused: COUPON_EXPIRED","instance":"/internal/coupons/price","code":"COUPON_EXPIRED"}`
+    (`application/problem+json`; Spring leaves out `type` when it is
+    `about:blank`), the shape of inventory-service's `POST /internal/stock`
+    409. The detail names the reason, never the code.
+  - **`/internal/**`** follows merchant-service's rules: its own security chain,
+    the shared key in `X-Internal-Api-Key` only (never a bearer token),
+    compared in constant time, no CORS headers. No key, a wrong key, and no key
+    configured (a WARN at startup) are the same bare 401. Every other path but
+    `/actuator/health` is a bare 401 until the coupon endpoints (ROADMAP A7)
+    bring the JWT chain. The coupon code, a subtotal and the key are never
+    logged at any level.
 
 **conversation-service**
 - `POST /orders/{reference}/threads/{merchantCode}/messages`

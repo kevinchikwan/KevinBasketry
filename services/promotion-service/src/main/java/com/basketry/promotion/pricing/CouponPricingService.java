@@ -25,7 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
  * {@link IllegalArgumentException}, never a refusal.
  *
  * <p>Read-only: pricing a coupon writes nothing and does not count it. The code
- * is logged only at DEBUG.
+ * is never logged; a refusal's reason is, at DEBUG.
  */
 @Service
 public class CouponPricingService {
@@ -54,21 +54,22 @@ public class CouponPricingService {
             throw new IllegalArgumentException("A coupon code is needed.");
         }
         Set<Long> merchantIds = DiscountCalculator.checkCart(cart);
-        Coupon coupon = coupons.findByCode(code).orElseThrow(() -> refused(code, CouponRefusal.COUPON_NOT_FOUND));
+        Coupon coupon = coupons.findByCode(code).orElseThrow(() -> refused(CouponRefusal.COUPON_NOT_FOUND));
         if (!coupon.isActive()) {
-            throw refused(code, CouponRefusal.COUPON_INACTIVE);
+            throw refused(CouponRefusal.COUPON_INACTIVE);
         }
         if (!clock.instant().isBefore(coupon.getExpiresAt())) {
-            throw refused(code, CouponRefusal.COUPON_EXPIRED);
+            throw refused(CouponRefusal.COUPON_EXPIRED);
         }
         if (coupon.getScope() == CouponScope.MERCHANT && !merchantIds.contains(coupon.getMerchantId())) {
-            throw refused(code, CouponRefusal.COUPON_NOT_APPLICABLE);
+            throw refused(CouponRefusal.COUPON_NOT_APPLICABLE);
         }
         return DiscountCalculator.price(coupon.getDiscount(), coupon.getScope(), coupon.getMerchantId(), cart);
     }
 
-    private static CouponRefusedException refused(CouponCode code, CouponRefusal reason) {
-        log.debug("Coupon {} refused: {}", code, reason);
+    private static CouponRefusedException refused(CouponRefusal reason) {
+        // The reason only: the code is never logged (HttpLeakTests).
+        log.debug("Coupon refused: {}", reason);
         return new CouponRefusedException(reason);
     }
 }

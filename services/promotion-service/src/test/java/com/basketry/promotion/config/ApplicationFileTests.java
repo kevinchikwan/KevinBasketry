@@ -38,4 +38,20 @@ class ApplicationFileTests {
         assertThat(application.getProperty("spring.jpa.hibernate.ddl-auto")).isEqualTo("validate");
         assertThat(application.getProperty("spring.jpa.open-in-view")).isEqualTo("false");
     }
+
+    /**
+     * The web layer never logs request details (headers, so the internal key),
+     * and Tomcat's access log stays off: neither shows in the leak test's log
+     * capture (the access log goes to its own file). Mutations:
+     * {@code log-request-details: true}; {@code accesslog.enabled: true}.
+     */
+    @Test
+    void requestDetailsAndTheAccessLogAreOff() {
+        YamlPropertiesFactoryBean yaml = new YamlPropertiesFactoryBean();
+        yaml.setResources(new ClassPathResource("application.yml"));
+        Properties application = yaml.getObject();
+
+        assertThat(application.getProperty("spring.mvc.log-request-details")).isEqualTo("false");
+        assertThat(application.getProperty("server.tomcat.accesslog.enabled")).isEqualTo("false");
+    }
 }
