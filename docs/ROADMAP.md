@@ -50,10 +50,11 @@ Status as of 25 Nov 2026. One checkbox per small commit; each should fit in a da
 - [ ] E6 README with the live URL
 
 ## F. Small items (30 to 60 minutes each)
+- [ ] identity-service first (a password sent as a number may be quoted in Spring's DEBUG log), then catalog, merchant and inventory: read the body in the controller, keep only the path
 - [ ] GET /merchants/me in merchant-service
 - [ ] Idempotency key for stock adjustments
 - [ ] iss and aud checks in tokens
 - [ ] A weak spot: one more test or mutation
 - [ ] README or DESIGN wording fixes
-- [ ] Port order-service's web hardening (69f513f) back to identity, catalog, merchant and inventory: log-request-details false, Tomcat's access log off, request objects that mask secrets in toString, strict strings, a fixed 400 detail with only the field path, a body limit before security, ResponseEntityExceptionHandler; and check order-service itself: Spring logs Jackson's message at DEBUG, which quotes a string sent for a number field (promotion-service's HttpLeakTests found this)
+- [ ] Port order-service's web hardening (69f513f) back to identity, catalog, merchant and inventory: log-request-details false, Tomcat's access log off, request objects that mask secrets in toString, strict strings, a fixed 400 detail with only the field path, a body limit before security, ResponseEntityExceptionHandler. Done in order-service itself (F1): CheckoutController reads the body, so Jackson's message (which quoted a card number sent as a string for expectedTotal, productId or quantity) never reaches Spring's DEBUG log (HttpJacksonMessageLeakTests)
 - [ ] Refuse repeated fields and trailing tokens in HTTP bodies in every service (STRICT_DUPLICATE_DETECTION and FAIL_ON_TRAILING_TOKENS, as promotion-service's StrictJsonConfig); today only the Kafka parsers do

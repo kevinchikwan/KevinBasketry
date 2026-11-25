@@ -976,8 +976,9 @@ row lock:
 - the checkout request, in memory only. The request object masks it in
   `toString`, and **no access log or request logging ever records the checkout
   body** (no payload logging filter, Tomcat's access log never configured with
-  the body). A 400 never quotes a value, and the error handler never passes a
-  Jackson message through (it can quote the number);
+  the body). A 400 never quotes a value, and no Jackson message ever reaches a
+  log or an answer: the controller reads the body itself and keeps only the
+  field path (Section 3, order-service, JSON);
 - the charge request's outbox row, until it is `SENT` or `CANCELLED`. The same
   update that marks it replaces `cardNumber` in the payload with `null`, so a
   replay of the stored payload by hand is dead-lettered by payment-service,
@@ -1558,7 +1559,13 @@ account); identity-service never issues another, so any other is a 401.
   as a key, alone or after a letter, never comes back in an answer or a log. A body that is not JSON of the
   checkout's shape is a 400 with a fixed detail and the field path only (for
   example `At: lines[1].quantity.`), **never Jackson's message**, which can quote
-  the input.
+  the input (`Cannot coerce String value ("...")` for a string sent as
+  `expectedTotal`, a `productId` or a `quantity`). The controller reads the body
+  as bytes, first, with the application's own JsonMapper (so every setting
+  above applies) and keeps only the path: when Spring read it, Spring logged
+  Jackson's message at DEBUG and TRACE, card number included. Only JSON is
+  read (`application/json`, `application/*+json`); anything else is a 415. The
+  path shows only the request's own field names, any other as `?`.
 - **Body size:** a checkout body over 64 KB is a **413** `BODY_TOO_LARGE`,
   decided by the bytes actually read, so a chunked body (no Content-Length)
   is caught too; a declared Content-Length over it is refused before reading. A
@@ -1570,10 +1577,18 @@ account); identity-service never issues another, so any other is a 401.
   client that is not the Buyer app ever sees it.
 - **Never logged:** `spring.mvc.log-request-details` is false (it would log
   headers, so the bearer token), there is no request-logging filter, Tomcat's
-  access log stays off, and the request object masks the card number in
-  `toString` (Spring logs the object it read at DEBUG). A test runs every
-  request path over a real port with Spring's web layer at TRACE and Tomcat at
-  DEBUG.
+  access log stays off, Spring never holds the request object or Jackson's
+  message (the controller reads the body, above), and the request object still
+  masks the card number in `toString`. Two tests run over a real port with
+  Spring's web layer at TRACE, Tomcat and our own loggers at DEBUG, and check
+  that no log line and no answer holds the number: `HttpCardNumberLeakTests`
+  (a checkout and its replay, a body rule, a wrong type, broken JSON, the
+  number as a field name, the number as a string in `expectedTotal`, a
+  refusal, a chunked body over the limit) and `HttpJacksonMessageLeakTests`
+  (each way Jackson can fail: the number as a JSON number for `cardNumber`,
+  as a string for `expectedTotal`, a `productId` or a `quantity`, as a
+  repeated or unknown field name, alone or inside an unknown field, as a
+  trailing token, and in a real body followed by a trailing token).
 
 - `POST /orders/checkout` (a token with `BUYER`; FR-B7 to FR-B12). Starts the
   saga; the steps and their order are in Section 2, order-service.

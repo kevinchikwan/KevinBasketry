@@ -18,7 +18,6 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
-import tools.jackson.core.JacksonException;
 
 /**
  * Every refusal as a problem detail (DESIGN.md Section 3, order-service). A
@@ -34,34 +33,21 @@ class OrderExceptionHandler extends ResponseEntityExceptionHandler {
     static final String UNREADABLE = "The body is not JSON of the checkout's shape.";
 
     /**
-     * Never Jackson's message, which can quote the input (a card number). Only
-     * the path of field names and indexes, which the request object defines.
+     * A missing body: the fixed detail, never Spring's message. JSON itself is
+     * read by CheckoutController, so Jackson's message, which can quote the
+     * input (a card number), never reaches Spring or its log.
      */
     @Override
     protected ResponseEntity<Object> handleHttpMessageNotReadable(HttpMessageNotReadableException ex,
                                                                   HttpHeaders headers, HttpStatusCode status,
                                                                   WebRequest request) {
-        String path = path(ex.getCause());
-        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST,
-                path.isEmpty() ? UNREADABLE : UNREADABLE + " At: " + path + ".");
-        return ResponseEntity.badRequest().body(problem);
+        return ResponseEntity.badRequest().body(ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, UNREADABLE));
     }
 
-    private static String path(Throwable cause) {
-        if (!(cause instanceof JacksonException jackson) || jackson.getPath() == null) {
-            return "";
-        }
-        StringBuilder path = new StringBuilder();
-        for (JacksonException.Reference reference : jackson.getPath()) {
-            String name = reference.getPropertyName();
-            if (name != null) {
-                // Only the request object's own field names reach here: an unknown name goes to the any-setter.
-                path.append(path.isEmpty() ? "" : ".").append(name);
-            } else if (reference.getIndex() >= 0) {
-                path.append('[').append(reference.getIndex()).append(']');
-            }
-        }
-        return path.toString();
+    /** The fixed detail and the field path only (UnreadableBodyException). */
+    @ExceptionHandler(UnreadableBodyException.class)
+    ProblemDetail unreadable(UnreadableBodyException e) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, e.getMessage());
     }
 
     /** 400 naming every broken rule; COUPONS_NOT_SUPPORTED when a coupon was sent. */
