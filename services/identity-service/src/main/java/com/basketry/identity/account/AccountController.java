@@ -1,7 +1,8 @@
 package com.basketry.identity.account;
 
 import com.basketry.identity.auth.TokenCapabilities;
-import jakarta.validation.Valid;
+import com.basketry.identity.web.RequestBodyReader;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import java.net.URI;
@@ -18,6 +19,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 @RestController
@@ -28,18 +30,25 @@ public class AccountController {
 
     private final AccountRegistrationService registrationService;
     private final AccountRepository accounts;
+    private final RequestBodyReader bodies;
 
-    public AccountController(AccountRegistrationService registrationService, AccountRepository accounts) {
+    public AccountController(AccountRegistrationService registrationService, AccountRepository accounts,
+                             RequestBodyReader bodies) {
         this.registrationService = registrationService;
         this.accounts = accounts;
+        this.bodies = bodies;
     }
 
     /**
      * Public buyer self-registration. Returns 201 with a Location header and no
-     * body; the account's representation comes from GET /accounts/{id}.
+     * body; the account's representation comes from GET /accounts/{id}. The
+     * body is read and validated by RequestBodyReader, so neither the email
+     * nor the password reaches Spring's log (ROADMAP F2).
      */
     @PostMapping("/accounts/register")
-    public ResponseEntity<Void> register(@Valid @RequestBody RegisterAccountRequest request) {
+    public ResponseEntity<Void> register(@RequestBody(required = false) byte[] body, HttpServletRequest http)
+            throws HttpMediaTypeNotSupportedException {
+        RegisterAccountRequest request = bodies.read(http, body, RegisterAccountRequest.class);
         Account account = registrationService.registerBuyer(request.email(), request.password());
         URI location = ServletUriComponentsBuilder.fromCurrentContextPath()
                 .path("/accounts/{id}")
@@ -87,13 +96,15 @@ public class AccountController {
      * login gate for the whole account. The admin check comes before the
      * lookup, so only an admin can learn that an id does not exist (404).
      * Tokens already issued are not revoked; checkout re-checks buyerActive
-     * live through GET /accounts/{id}.
+     * live through GET /accounts/{id}. The body is read and validated first,
+     * before the admin check, as when Spring read it before the method ran.
      */
     @PatchMapping("/accounts/{id}/buyer-status")
     @Transactional
-    public AccountResponse setBuyerStatus(@PathVariable long id,
-                                          @Valid @RequestBody BuyerStatusRequest request,
-                                          @AuthenticationPrincipal Jwt jwt) {
+    public AccountResponse setBuyerStatus(@PathVariable long id, @RequestBody(required = false) byte[] body,
+                                          @AuthenticationPrincipal Jwt jwt, HttpServletRequest http)
+            throws HttpMediaTypeNotSupportedException {
+        BuyerStatusRequest request = bodies.read(http, body, BuyerStatusRequest.class);
         TokenCapabilities.requireAdmin(jwt);
         Account account = accounts.findById(id).orElseThrow(AccountNotFoundException::new);
         account.setBuyerActive(request.buyerActive());

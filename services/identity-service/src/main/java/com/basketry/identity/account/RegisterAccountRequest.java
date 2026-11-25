@@ -23,9 +23,9 @@ public record RegisterAccountRequest(
         @NotNull
         String password) {
 
-    /** Keeps the plaintext password out of any log line that prints this object. */
+    /** Keeps the email and the plaintext password out of any log line that prints this object. */
     @Override
     public String toString() {
-        return "RegisterAccountRequest[email=" + email + ", password=***]";
+        return "RegisterAccountRequest[email=***, password=***]";
     }
 }

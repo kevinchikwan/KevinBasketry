@@ -23,9 +23,9 @@ public record MerchantLinkRequest(
 
         String initialPassword) {
 
-    /** Keeps the plaintext password out of any log line that prints this object. */
+    /** Keeps the email and the plaintext password out of any log line that prints this object. */
     @Override
     public String toString() {
-        return "MerchantLinkRequest[email=" + email + ", merchantId=" + merchantId + ", initialPassword=***]";
+        return "MerchantLinkRequest[email=***, merchantId=" + merchantId + ", initialPassword=***]";
     }
 }

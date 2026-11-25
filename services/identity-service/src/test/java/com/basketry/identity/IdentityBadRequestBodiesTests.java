@@ -7,17 +7,22 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import com.basketry.identity.account.AccountRegistrationService;
 import com.basketry.identity.account.AccountRepository;
 import com.jayway.jsonpath.JsonPath;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.http.HttpMethod;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 /**
@@ -209,6 +214,215 @@ class IdentityBadRequestBodiesTests {
     @Test
     void merchantLinkWithoutTheKeyIsABare401() throws Exception {
         assertAnswer(post("/internal/accounts/merchant-link"), "application/json", "{x", 401, "");
+    }
+
+    // ---- request shapes (added in F2 part 2, each proven against e4ff3b2's code first) ----
+
+    private static final String CANNOT_PARSE = "Could not parse Content-Type.";
+    private static final AtomicInteger UNIQUE = new AtomicInteger();
+
+    enum Endpoint { REGISTER, LOGIN, BUYER_STATUS, MERCHANT_LINK }
+
+    /** The endpoint's own method and path, with the buyer status path for {@code targetId}. */
+    private String pathOf(Endpoint endpoint) {
+        return switch (endpoint) {
+            case REGISTER -> "/accounts/register";
+            case LOGIN -> "/auth/login";
+            case BUYER_STATUS -> "/accounts/" + targetId + "/buyer-status";
+            case MERCHANT_LINK -> "/internal/accounts/merchant-link";
+        };
+    }
+
+    private static HttpMethod methodOf(Endpoint endpoint) {
+        return endpoint == Endpoint.BUYER_STATUS ? HttpMethod.PATCH : HttpMethod.POST;
+    }
+
+    /** A body each endpoint accepts; {@code text} is put into the password (register, link) to test charsets. */
+    private static String valid(Endpoint endpoint, String passwordEnd) {
+        int n = UNIQUE.incrementAndGet();
+        return switch (endpoint) {
+            case REGISTER -> "{\"email\":\"shape" + n + "@example.com\",\"password\":\"Corr3ct-Hors" + passwordEnd + "!\"}";
+            case LOGIN -> "{\"email\":\"target@example.com\",\"password\":\"Corr3ct-Hors" + passwordEnd + "!\"}";
+            case BUYER_STATUS -> "{\"buyerActive\":true}";
+            case MERCHANT_LINK -> "{\"email\":\"shape" + n + "@example.com\",\"merchantId\":" + (1000 + n)
+                    + ",\"initialPassword\":\"Corr3ct-Hors" + passwordEnd + "!\"}";
+        };
+    }
+
+    /** The success each endpoint answers a valid body with. */
+    private static int ok(Endpoint endpoint) {
+        return switch (endpoint) {
+            case REGISTER, MERCHANT_LINK -> 201;
+            case LOGIN, BUYER_STATUS -> 200;
+        };
+    }
+
+    private void authorize(Endpoint endpoint, MockHttpServletRequestBuilder request) {
+        if (endpoint == Endpoint.BUYER_STATUS) {
+            request.header("Authorization", "Bearer " + adminToken);
+        } else if (endpoint == Endpoint.MERCHANT_LINK) {
+            request.header("X-Internal-Api-Key", KEY);
+        }
+    }
+
+    /**
+     * Sends {@code body} with the raw {@code Content-Type} header (none if null)
+     * and checks the status, and for an error the exact problem detail. MockMvc
+     * adds the request's character encoding (UTF-8) to a type without a charset,
+     * as Spring then reports it ("text/plain;charset=UTF-8").
+     */
+    private void assertShape(Endpoint endpoint, HttpMethod method, String contentType, byte[] body, int status,
+                             String detail, String title) throws Exception {
+        String path = pathOf(endpoint);
+        MockHttpServletRequestBuilder request = MockMvcRequestBuilders.request(method, path);
+        authorize(endpoint, request);
+        if (contentType != null) {
+            request.header("Content-Type", contentType);
+        }
+        if (body != null) {
+            request.content(body);
+        }
+        MockHttpServletResponse response = mvc.perform(request).andReturn().getResponse();
+
+        assertThat(response.getStatus()).isEqualTo(status);
+        if (detail != null) {
+            assertThat(response.getContentAsString()).isEqualTo(problem(detail, path, status, title));
+            assertThat(response.getContentType()).isEqualTo(PROBLEM);
+        }
+    }
+
+    private void assertShape(Endpoint endpoint, String contentType, byte[] body, int status, String detail,
+                             String title) throws Exception {
+        assertShape(endpoint, methodOf(endpoint), contentType, body, status, detail, title);
+    }
+
+    private static byte[] utf8(String text) {
+        return text.getBytes(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * An empty body: a 400 without a Content-Type, but a 415 with an unsupported
+     * one (Spring answers 415 for any unsupported type unless there is neither a
+     * type nor a body). A body of only whitespace is not empty. Mutation: the
+     * content-type check put back before the empty check (no Content-Type and
+     * no body: a 415).
+     */
+    @ParameterizedTest
+    @EnumSource(Endpoint.class)
+    void anEmptyOrBlankBodyIsAnsweredAsBefore(Endpoint endpoint) throws Exception {
+        assertShape(endpoint, null, null, 400, UNREADABLE, "Bad Request");
+        assertShape(endpoint, "text/plain", null, 415, TEXT_PLAIN, "Unsupported Media Type");
+        assertShape(endpoint, "application/json", null, 400, UNREADABLE, "Bad Request");
+        assertShape(endpoint, "application/json", utf8("   "), 400, UNREADABLE, "Bad Request");
+        assertShape(endpoint, "text/plain", utf8("   "), 415, TEXT_PLAIN, "Unsupported Media Type");
+    }
+
+    /**
+     * A valid body under a content type that is not JSON, or none: 415 naming
+     * the type as Spring read it. Mutation: the content-type check removed.
+     */
+    @ParameterizedTest
+    @EnumSource(Endpoint.class)
+    void aValidBodyUnderAnotherTypeIs415(Endpoint endpoint) throws Exception {
+        assertShape(endpoint, null, utf8(valid(endpoint, "e")), 415, NO_TYPE, "Unsupported Media Type");
+        assertShape(endpoint, "application/xml", utf8(valid(endpoint, "e")), 415,
+                "Content-Type 'application/xml;charset=UTF-8' is not supported.", "Unsupported Media Type");
+        assertShape(endpoint, "text/plain", utf8(valid(endpoint, "e")), 415, TEXT_PLAIN, "Unsupported Media Type");
+    }
+
+    /**
+     * Any JSON type is read, with or without a charset; a non-Unicode charset
+     * decodes the body (an ISO-8859-1 e-acute is a valid password character for
+     * register and link, and a wrong password for login, so a 401); a Unicode
+     * one is left to Jackson's own detection, so UTF-8 bytes labelled UTF-16
+     * are read too. Mutation: the body always read as bytes, the charset
+     * ignored (the ISO-8859-1 e-acute is then not UTF-8: a 400).
+     */
+    @ParameterizedTest
+    @EnumSource(Endpoint.class)
+    void everyJsonTypeAndCharsetIsReadAsBefore(Endpoint endpoint) throws Exception {
+        int ok = ok(endpoint);
+        assertShape(endpoint, "application/json;charset=UTF-8", utf8(valid(endpoint, "e")), ok, null, null);
+        assertShape(endpoint, "application/json;charset=ISO-8859-1",
+                valid(endpoint, "e").getBytes(StandardCharsets.ISO_8859_1), ok, null, null);
+        assertShape(endpoint, "application/json;charset=UTF-16",
+                valid(endpoint, "e").getBytes(StandardCharsets.UTF_16), ok, null, null);
+        assertShape(endpoint, "application/json;charset=UTF-16", utf8(valid(endpoint, "e")), ok, null, null);
+        assertShape(endpoint, "application/vnd.x+json", utf8(valid(endpoint, "e")), ok, null, null);
+        int latin = endpoint == Endpoint.LOGIN ? 401 : ok;
+        assertShape(endpoint, "application/json;charset=ISO-8859-1",
+                valid(endpoint, "\u00e9").getBytes(StandardCharsets.ISO_8859_1), latin,
+                latin == 401 ? "Invalid email or password." : null, latin == 401 ? "Unauthorized" : null);
+        assertShape(endpoint, "application/json;charset=UTF-8", utf8(valid(endpoint, "\u00e9")), latin,
+                latin == 401 ? "Invalid email or password." : null, latin == 401 ? "Unauthorized" : null);
+    }
+
+    /**
+     * A Content-Type that cannot be parsed, or an unknown charset: 415 "Could not
+     * parse Content-Type.", answered by Spring's own argument resolver before the
+     * controller is called. Mutation: problem details disabled.
+     */
+    @ParameterizedTest
+    @EnumSource(Endpoint.class)
+    void aContentTypeThatCannotBeParsedIs415(Endpoint endpoint) throws Exception {
+        for (String type : new String[] {"json", "application/", ";;", "application/json;charset=X-NOPE"}) {
+            assertShape(endpoint, type, utf8(valid(endpoint, "e")), 415, CANNOT_PARSE, "Unsupported Media Type");
+        }
+    }
+
+    /** {} where fields are required. Mutation: validation skipped. */
+    @ParameterizedTest
+    @EnumSource(value = Endpoint.class, names = {"REGISTER", "LOGIN", "MERCHANT_LINK"})
+    void anEmptyObjectIsInvalidContent(Endpoint endpoint) throws Exception {
+        assertShape(endpoint, "application/json", utf8("{}"), 400, INVALID, "Bad Request");
+    }
+
+    /**
+     * Another method on the same path: 405 with Allow (its methods in any order:
+     * Spring does not keep the order stable), behind the same security as before. /accounts/register also allows GET, because GET /accounts/{id}
+     * matches it. Without a token, PATCH on the public POST paths is a 401: the
+     * security chain only opens POST. Mutation: problem details disabled.
+     */
+    @Test
+    void anotherMethodIs405AsBefore() throws Exception {
+        assertMethod(Endpoint.REGISTER, HttpMethod.PATCH, true, 405, "Method 'PATCH' is not supported.", "POST, GET");
+        assertMethod(Endpoint.REGISTER, HttpMethod.PUT, true, 405, "Method 'PUT' is not supported.", "POST, GET");
+        assertMethod(Endpoint.REGISTER, HttpMethod.PATCH, false, 401, null, null);
+        assertMethod(Endpoint.LOGIN, HttpMethod.PATCH, true, 405, "Method 'PATCH' is not supported.", "POST");
+        assertMethod(Endpoint.LOGIN, HttpMethod.PUT, true, 405, "Method 'PUT' is not supported.", "POST");
+        assertMethod(Endpoint.LOGIN, HttpMethod.PATCH, false, 401, null, null);
+        assertMethod(Endpoint.BUYER_STATUS, HttpMethod.POST, true, 405, "Method 'POST' is not supported.", "PATCH");
+        assertMethod(Endpoint.BUYER_STATUS, HttpMethod.PUT, true, 405, "Method 'PUT' is not supported.", "PATCH");
+        assertMethod(Endpoint.BUYER_STATUS, HttpMethod.POST, false, 401, null, null);
+        assertMethod(Endpoint.MERCHANT_LINK, HttpMethod.PATCH, true, 405, "Method 'PATCH' is not supported.", "POST");
+        assertMethod(Endpoint.MERCHANT_LINK, HttpMethod.PUT, true, 405, "Method 'PUT' is not supported.", "POST");
+        assertMethod(Endpoint.MERCHANT_LINK, HttpMethod.PATCH, false, 401, null, null);
+    }
+
+    /** {@code credentials}: the admin token for every path but the internal one, which gets the key. */
+    private void assertMethod(Endpoint endpoint, HttpMethod method, boolean credentials, int status, String detail,
+                              String allow) throws Exception {
+        String path = pathOf(endpoint);
+        MockHttpServletRequestBuilder request = MockMvcRequestBuilders.request(method, path)
+                .contentType("application/json").content(valid(endpoint, "e"));
+        if (credentials) {
+            if (endpoint == Endpoint.MERCHANT_LINK) {
+                request.header("X-Internal-Api-Key", KEY);
+            } else {
+                request.header("Authorization", "Bearer " + adminToken);
+            }
+        }
+        MockHttpServletResponse response = mvc.perform(request).andReturn().getResponse();
+
+        assertThat(response.getStatus()).isEqualTo(status);
+        assertThat(response.getContentAsString())
+                .isEqualTo(detail == null ? "" : problem(detail, path, status, "Method Not Allowed"));
+        // The methods in Allow, not their order: Spring does not keep it stable from run to run.
+        if (allow == null) {
+            assertThat(response.getHeader("Allow")).isNull();
+        } else {
+            assertThat(response.getHeader("Allow").split(", ")).containsExactlyInAnyOrder(allow.split(", "));
+        }
     }
 
     /**

@@ -50,7 +50,10 @@ Status as of 25 Nov 2026. One checkbox per small commit; each should fit in a da
 - [ ] E6 README with the live URL
 
 ## F. Small items (30 to 60 minutes each)
-- [ ] identity-service first (a password sent as a number may be quoted in Spring's DEBUG log), then catalog, merchant and inventory: read the body in the controller, keep only the path
+- [x] identity-service: read the body in the controller (F2). The password was never quoted (a JSON number for a string field is taken as text, so Jackson never failed on it, and toString masked it); the email was, at TRACE in every request object and at DEBUG as an invalid email's @Valid rejected value, and so were wrong-typed buyerActive and merchantId values. RequestBodyReader reads, validates and answers the same 400s and 415s (IdentityBadRequestBodiesTests); HttpJacksonMessageLeakTests (27 cases)
+- [ ] merchant-service next: read the body in the controller, keep only the path, as identity-service (loginEmail and initialPassword in POST /merchants, email and initialPassword in the account-link retry, the KYC flag and commission rate; toString prints loginEmail and unknown field names)
+- [ ] Strict strings for email and password in identity-service: a JSON number is a 400 (today it is accepted as text); this changes answers (register: the policy's 400 today; login: 401 today)
+- Known limitation, accepted: catalog-service and inventory-service still let Spring read their bodies. No personal data is in them (product fields; ids and stock deltas), but a wrong-typed value can be quoted in Spring's DEBUG and TRACE log.
 - [ ] GET /merchants/me in merchant-service
 - [ ] Idempotency key for stock adjustments
 - [ ] iss and aud checks in tokens

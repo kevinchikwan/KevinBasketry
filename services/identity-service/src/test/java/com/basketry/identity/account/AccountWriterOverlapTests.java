@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.basketry.identity.merchantlink.MerchantLinkService;
 import com.basketry.identity.merchantstatus.MerchantStatusHandler;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -18,9 +19,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
 
 /**
  * The writers of an Account row (DESIGN.md Section 2, identity-service). Each
@@ -89,7 +92,14 @@ class AccountWriterOverlapTests {
     }
 
     private void deactivateBuyer() {
-        controller.setBuyerStatus(accountId, new BuyerStatusRequest(false), ADMIN);
+        // The controller reads the body itself (RequestBodyReader): JSON bytes and the request's content type.
+        MockHttpServletRequest json = new MockHttpServletRequest("PATCH", "/");
+        json.setContentType("application/json");
+        try {
+            controller.setBuyerStatus(accountId, "{\"buyerActive\":false}".getBytes(StandardCharsets.UTF_8), ADMIN, json);
+        } catch (HttpMediaTypeNotSupportedException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private void applyDeactivation() {
