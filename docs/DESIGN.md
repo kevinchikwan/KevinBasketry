@@ -1179,8 +1179,9 @@ shape for review.
     request records still print neither the email nor the password.
   - *Response objects* (Spring's TRACE "Writing [...]" line):
     `AccountResponse` (also inside the Admin list's `AccountPage`) and
-    `MerchantLinkResponse` print `email=***`. The JSON answers are
-    unchanged and hold the email by design.
+    `MerchantLinkResponse` print `email=***`, and `LoginResponse` prints
+    `accessToken=***` (F4). The JSON answers are unchanged and hold the
+    email and the access token by design.
   - *Jackson's message* (DEBUG and TRACE; it quotes a wrong-typed value):
     an unreadable body is the same 400 as before (`Failed to read
     request`) and keeps neither the message nor the exception.
@@ -1198,7 +1199,9 @@ shape for review.
   wrong password) and in successful answers (a registration, a login, the
   account read with its own token, the Admin list, a merchant link that
   creates an account and one that links an existing one): no log line
-  holds either, and no answer holds the password.
+  holds either, nor the access token of the buyer's or the Admin's login
+  (checked first in the login answer, so the test cannot pass on an empty
+  token), and no answer holds the password.
   `IdentityBadRequestBodiesTests` pins every 400, 401, 405 and 415 byte
   for byte, each proven against the code before the change: unreadable
   and wrong-typed bodies, every `@Valid` failure, empty and blank bodies
@@ -1209,10 +1212,9 @@ shape for review.
   labelled UTF-16 is read), and other methods (405; `Allow` for
   `/accounts/register` includes GET, as `GET /accounts/{id}` matches it).
 
-  Known limits: a successful login's answer, with the **access token**, is
-  written in full in Spring's TRACE log (`Writing [LoginResponse[...]]`);
-  the other answers hold no email or password; and the checks are only as
-  good as the cases the leak test sends. catalog-service
+  Known limits: the checks are only as good as the cases the leak test
+  sends (a successful login's access token is now masked in the TRACE
+  line, `Writing [LoginResponse[accessToken=***, ...]]`). catalog-service
   and inventory-service still let Spring read their bodies; none holds
   personal data, but a wrong-typed value can be quoted in Spring's DEBUG
   and TRACE log.

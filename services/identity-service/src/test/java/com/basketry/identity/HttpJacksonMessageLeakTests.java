@@ -173,9 +173,11 @@ class HttpJacksonMessageLeakTests {
      * Successful answers: Spring logs the object it writes at TRACE ("Writing
      * [...]"). A registration, a login, the account read with its own token, the
      * Admin list, a merchant link that creates an account and one that links
-     * the existing account. The answers hold the email by design; no log line
-     * may hold it, and nothing may hold the password. Mutations: AccountResponse's
-     * toString with the email; MerchantLinkResponse's toString with the email.
+     * the existing account. The answers hold the email and the login's access
+     * token by design; no log line may hold either, and nothing may hold the
+     * password. Mutations: AccountResponse's toString with the email;
+     * MerchantLinkResponse's toString with the email; LoginResponse's toString
+     * with the access token.
      */
     @org.junit.jupiter.api.Test
     void successfulAnswersPutNoSentinelInALogLine(CapturedOutput output) throws Exception {
@@ -203,13 +205,22 @@ class HttpJacksonMessageLeakTests {
                 + ",\"merchantId\":42}", "X-Internal-Api-Key", KEY));
 
         assertThat(responses).extracting(HttpResponse::statusCode).containsExactly(201, 200, 200, 200, 201, 200);
+        // The answers hold the tokens by design; checked first, so the log check cannot pass on an empty token.
+        List<String> tokens = List.of(token, admin);
+        assertThat(tokens).allSatisfy(jwt -> assertThat(jwt).matches("[\\w-]{10,}\\.[\\w-]{10,}\\.[\\w-]{10,}"));
+        assertThat(login.body()).contains(token);
         // The check would be empty if the logging were off: the answers are written at TRACE.
         assertThat(output).contains("Writing [AccountResponse[").contains("Writing [MerchantLinkResponse[")
-                .contains("Writing [AccountPage[");
+                .contains("Writing [AccountPage[").contains("Writing [LoginResponse[");
         List<String> leaks = new java.util.ArrayList<>();
         for (String sentinel : SENTINELS) {
             output.getAll().lines().filter(line -> line.contains(sentinel))
                     .forEach(line -> leaks.add("log:" + sentinel + " :: " + line));
+        }
+        // A login's access token, the buyer's and the Admin's, is in no log line.
+        for (String jwt : tokens) {
+            output.getAll().lines().filter(line -> line.contains(jwt))
+                    .forEach(line -> leaks.add("log:access token :: " + line.replace(jwt, "<token>")));
         }
         for (HttpResponse<String> response : responses) {
             if (response.body().contains(SHORT_PASSWORD)) {
