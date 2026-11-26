@@ -10,6 +10,7 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
 import tools.jackson.databind.annotation.JsonDeserialize;
@@ -62,13 +63,22 @@ public record CreateMerchantRequest(
         this(name, category, kycVerified, commissionRate, loginEmail, initialPassword, null);
     }
 
-    /** Throws {@link InvalidRequestBodyException} (400) naming every field this endpoint does not accept. */
+    /**
+     * Throws {@link InvalidRequestBodyException} (400) naming every field this
+     * endpoint does not accept, if its name may be shown (UnknownFieldNames);
+     * any other is only counted.
+     */
     void rejectUnknownFields() {
         if (!unknownFields.isEmpty()) {
             String hint = unknownFields.containsKey("active") ? " A new merchant always starts active." : "";
             // Sorted: Jackson does not keep the request's field order in this map.
-            throw new InvalidRequestBodyException(
-                    "Unknown field(s): " + String.join(", ", new TreeSet<>(unknownFields.keySet())) + "." + hint);
+            TreeSet<String> names = new TreeSet<>(unknownFields.keySet());
+            List<String> shown = UnknownFieldNames.shownOf(names);
+            long hidden = UnknownFieldNames.hiddenOf(names);
+            String named = shown.isEmpty() ? "" : "Unknown field(s): " + String.join(", ", shown) + ".";
+            String counted = hidden == 0 ? ""
+                    : (named.isEmpty() ? "" : " ") + hidden + " unknown field(s) with a name that is not shown.";
+            throw new InvalidRequestBodyException(named + counted + hint);
         }
     }
 
@@ -76,11 +86,14 @@ public record CreateMerchantRequest(
         return value == null ? null : value.strip();
     }
 
-    /** Keeps the plaintext password (and unknown values) out of any log line that prints this object. */
+    /**
+     * Keeps the name, the login email, the plaintext password and the unknown
+     * fields (names and values) out of any log line that prints this object.
+     */
     @Override
     public String toString() {
-        return "CreateMerchantRequest[name=" + name + ", category=" + category + ", kycVerified=" + kycVerified
-                + ", commissionRate=" + commissionRate + ", loginEmail=" + loginEmail + ", initialPassword=***"
-                + ", unknownFields=" + unknownFields.keySet() + "]";
+        return "CreateMerchantRequest[name=***, category=" + category + ", kycVerified=" + kycVerified
+                + ", commissionRate=" + commissionRate + ", loginEmail=***, initialPassword=***"
+                + ", unknownFields=" + unknownFields.size() + "]";
     }
 }

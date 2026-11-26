@@ -28,7 +28,7 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
  * shape that succeeds. Written, and proven on the unchanged code, before the
  * body is kept out of Spring's log (ROADMAP F3), which must leave every one
  * of them unchanged, except the unknown field names in the two
- * *UnsafeUnknownFieldNames* tests. MockMvc adds the request's character
+ * *UnsafeUnknownFieldNames* tests, which F3 changed. MockMvc adds the request's character
  * encoding (UTF-8) to a type without a charset, as Spring then reports it.
  */
 class MerchantBadRequestBodiesTests extends MerchantServiceTestBase {
@@ -267,31 +267,29 @@ class MerchantBadRequestBodiesTests extends MerchantServiceTestBase {
     }
 
     /**
-     * Today, any unknown field name is named in the answer, even one that
-     * could be a secret (F3 changes these answers, and only these). Mutation:
-     * "Unknown field(s): " reworded in CreateMerchantRequest.
+     * An unknown field name that could be a secret (a run of 6 digits, a
+     * character outside letters, digits and _, more than 41 characters) is only
+     * counted (F3 changed these answers, and only these; until then the name
+     * was named). Mutation: the name rule widened to 42 characters.
      */
     @Test
     void createUnsafeUnknownFieldNames() throws Exception {
         String base = "{\"name\":\"Shop\",\"category\":\"Groceries\",\"kycVerified\":true,\"commissionRate\":5.00,"
                 + "\"loginEmail\":\"a@example.com\"";
-        assertShape(Endpoint.CREATE, "application/json", utf8(base + ",\"4929117300568841\":1}"), 400,
-                "Unknown field(s): 4929117300568841.", BAD);
-        assertShape(Endpoint.CREATE, "application/json", utf8(base + ",\"Zq7Pw!Lk9xQ\":1}"), 400,
-                "Unknown field(s): Zq7Pw!Lk9xQ.", BAD);
-        assertShape(Endpoint.CREATE, "application/json", utf8(base + ",\"" + "a".repeat(42) + "\":1}"), 400,
-                "Unknown field(s): " + "a".repeat(42) + ".", BAD);
+        String counted = "1 unknown field(s) with a name that is not shown.";
+        assertShape(Endpoint.CREATE, "application/json", utf8(base + ",\"4929117300568841\":1}"), 400, counted, BAD);
+        assertShape(Endpoint.CREATE, "application/json", utf8(base + ",\"Zq7Pw!Lk9xQ\":1}"), 400, counted, BAD);
+        assertShape(Endpoint.CREATE, "application/json", utf8(base + ",\"" + "a".repeat(42) + "\":1}"), 400, counted,
+                BAD);
     }
 
-    /** As create, for update. Mutation: "Unknown or not updatable field(s): " reworded in UpdateMerchantRequest. */
+    /** As create, for update (F3 changed these answers). Mutation: the digit-run check removed. */
     @Test
     void updateUnsafeUnknownFieldNames() throws Exception {
-        assertShape(Endpoint.UPDATE, "application/json", utf8("{\"Zq7Pw!Lk9xQ\":1}"), 400,
-                "Unknown or not updatable field(s): Zq7Pw!Lk9xQ. Only commissionRate, kycVerified and active can be"
-                        + " changed.", BAD);
-        assertShape(Endpoint.UPDATE, "application/json", utf8("{\"a4929117300568841\":1}"), 400,
-                "Unknown or not updatable field(s): a4929117300568841. Only commissionRate, kycVerified and active can"
-                        + " be changed.", BAD);
+        String counted = "1 unknown or not updatable field(s) with a name that is not shown. Only commissionRate,"
+                + " kycVerified and active can be changed.";
+        assertShape(Endpoint.UPDATE, "application/json", utf8("{\"Zq7Pw!Lk9xQ\":1}"), 400, counted, BAD);
+        assertShape(Endpoint.UPDATE, "application/json", utf8("{\"a4929117300568841\":1}"), 400, counted, BAD);
     }
 
     /**

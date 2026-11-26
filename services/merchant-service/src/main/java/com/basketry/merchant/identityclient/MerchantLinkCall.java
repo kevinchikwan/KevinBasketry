@@ -9,9 +9,9 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 record MerchantLinkCall(String email, long merchantId, String initialPassword) {
 
-    /** Keeps the plaintext password out of any log line that prints this object. */
+    /** Keeps the email and the plaintext password out of any log line that prints this object (RestClient logs it at DEBUG). */
     @Override
     public String toString() {
-        return "MerchantLinkCall[email=" + email + ", merchantId=" + merchantId + ", initialPassword=***]";
+        return "MerchantLinkCall[email=***, merchantId=" + merchantId + ", initialPassword=***]";
     }
 }

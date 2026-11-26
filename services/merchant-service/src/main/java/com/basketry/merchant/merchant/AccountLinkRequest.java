@@ -27,6 +27,6 @@ public record AccountLinkRequest(
     /** Keeps the plaintext password out of any log line that prints this object. */
     @Override
     public String toString() {
-        return "AccountLinkRequest[email=" + email + ", initialPassword=***]";
+        return "AccountLinkRequest[email=***, initialPassword=***]";
     }
 }

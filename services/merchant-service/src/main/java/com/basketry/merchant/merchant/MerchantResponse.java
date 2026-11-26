@@ -29,4 +29,15 @@ public record MerchantResponse(
                 merchant.getAccountLinkStatus(),
                 merchant.getCreatedAt());
     }
+
+    /**
+     * Without the name and the login email: Spring logs the answer it writes at
+     * TRACE ("Writing [...]"), also inside a MerchantPage.
+     */
+    @Override
+    public String toString() {
+        return "MerchantResponse[id=" + id + ", merchantCode=" + merchantCode + ", name=***, category=" + category
+                + ", kycVerified=" + kycVerified + ", active=" + active + ", commissionRate=" + commissionRate
+                + ", loginEmail=***, accountLinkStatus=" + accountLinkStatus + ", createdAt=" + createdAt + "]";
+    }
 }

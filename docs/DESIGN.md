@@ -1407,6 +1407,49 @@ to tell apart carries a `code` property.
   (`BASKETRY_INTERNAL_API_KEY`, same rules); unset means a WARN at startup, as
   now, and every internal call refused as well as onboarding. The Ingress must
   never route it externally.
+- **Names, emails and passwords in the log: what is covered.** Spring still
+  reads the three bodies (`POST /merchants`, `POST /merchants/{code}/account-link`,
+  `PATCH /merchants/{code}`), so every content-type, charset and 400/415 rule
+  stays Spring's own; `QuietBodiesConfig` keeps the values out of what it logs.
+  With Spring's web layer at TRACE and Tomcat and our own loggers at DEBUG:
+  - *Jackson's message* (DEBUG and TRACE; "Unrecognized token '...'" quotes
+    an unquoted value): Boot's JSON converter is replaced by one with the
+    application's own JsonMapper (every `spring.jackson` setting, tested)
+    whose failed read keeps neither the message nor the exception. The answer
+    is Boot's own 400, as before.
+  - *Rejected values* (DEBUG; a failed `@Valid` check printed the login
+    email, the name, the rate): a `RequestBodyAdvice` validates a `@Valid`
+    body as soon as it is read, before Spring does, and answers Boot's own
+    400 (`Invalid request content.`) without the field errors.
+  - *Request and answer objects* (TRACE "Read ... to [...]" and "Writing
+    [...]"), and the call to identity-service (RestClient's DEBUG "Writing
+    [...]"): `CreateMerchantRequest`, `AccountLinkRequest`,
+    `OnboardingResponse`, `MerchantResponse` (also inside `MerchantPage`) and
+    `MerchantLinkCall` print `name=***` and the email as `***`; the JSON
+    answers are unchanged and hold the name and the email by design.
+  - *Unknown field names* in a 400 (in the answer and its log lines): named
+    only by order-service's rule (a letter first, at most 41 letters, digits
+    and `_`, no run of 6 digits); any other is counted ("1 unknown field(s)
+    with a name that is not shown"). This is the one answer F3 changed.
+
+  `HttpJacksonMessageLeakTests` sends a name, a login email, a password and
+  a number sentinel over a real port in 36 ways: as a JSON number or an
+  object for a string, as a repeated or unknown field name, inside an
+  unknown field, as an unknown field's value, as or before a trailing token,
+  unquoted (a password with no punctuation, quoted whole by Jackson), an
+  invalid email, a name too long, wrong types and out-of-range values for
+  `commissionRate`, `kycVerified` and `active`; and successful answers (an
+  onboarding, the merchant read, the Admin list, an update and a link
+  retry). No log line holds any of them, and no answer holds the password.
+  `MerchantBadRequestBodiesTests` pins every 400, 401, 405 and 415 byte for
+  byte, proven against the code before the change.
+
+  **The Spring-upgrade risk.** This rests on two Spring Boot 4.1 behaviours:
+  Boot backs off its JSON converter when the application defines one, and a
+  `RequestBodyAdvice`'s `afterBodyRead` runs before Spring validates a
+  `@Valid` body. An upgrade that changed either would bring the values back
+  to the DEBUG and TRACE log without failing a request. The leak test is the
+  alarm: it fails then, and must run after every Spring or Boot upgrade.
 
 **Calling identity-service.** merchant-service uses Spring `RestClient` on
 the JDK HttpClient.

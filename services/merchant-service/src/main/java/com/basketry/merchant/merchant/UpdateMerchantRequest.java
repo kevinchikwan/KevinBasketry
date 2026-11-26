@@ -66,9 +66,14 @@ public class UpdateMerchantRequest {
      */
     void checkShape() {
         if (!unknownFields.isEmpty()) {
+            // A name is named only if it may be shown (UnknownFieldNames); any other is only counted.
+            List<String> shown = UnknownFieldNames.shownOf(unknownFields);
+            long hidden = UnknownFieldNames.hiddenOf(unknownFields);
+            String named = shown.isEmpty() ? "" : "Unknown or not updatable field(s): " + String.join(", ", shown) + ".";
+            String counted = hidden == 0 ? "" : (named.isEmpty() ? "" : " ") + hidden
+                    + " unknown or not updatable field(s) with a name that is not shown.";
             throw new InvalidRequestBodyException(
-                    "Unknown or not updatable field(s): " + String.join(", ", unknownFields)
-                            + ". Only commissionRate, kycVerified and active can be changed.");
+                    named + counted + " Only commissionRate, kycVerified and active can be changed.");
         }
         if (!commissionRatePresent && !kycVerifiedPresent && !activePresent) {
             throw new InvalidRequestBodyException("Give at least one of commissionRate, kycVerified and active.");

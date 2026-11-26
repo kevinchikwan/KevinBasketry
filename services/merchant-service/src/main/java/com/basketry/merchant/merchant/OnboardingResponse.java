@@ -58,4 +58,13 @@ public record OnboardingResponse(
                 outcome,
                 error);
     }
+
+    /** Without the name and the login email: Spring logs the answer it writes at TRACE ("Writing [...]"). */
+    @Override
+    public String toString() {
+        return "OnboardingResponse[id=" + id + ", merchantCode=" + merchantCode + ", name=***, category=" + category
+                + ", kycVerified=" + kycVerified + ", active=" + active + ", commissionRate=" + commissionRate
+                + ", loginEmail=***, accountLinkStatus=" + accountLinkStatus + ", createdAt=" + createdAt
+                + ", accountOutcome=" + accountOutcome + ", accountLinkError=" + accountLinkError + "]";
+    }
 }
