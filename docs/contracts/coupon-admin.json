@@ -1,5 +1,5 @@
 {
-  "about": "The coupon endpoints for the Merchant portal and Admin (DESIGN.md Section 3, promotion-service): requests and the answers they get, in order, against an empty coupon table with the service clock at 'now'. promotion-service's CouponContractTests sends each exchange with the caller's token and expects the status and the body, field by field and scale by scale. '{id}' is the id of the first coupon created; an answer's id is checked to be that id or a number, and is left out of the bodies here. Every other answer is pinned in CouponCreateAnswersTests. Change the contract only by changing this file first.",
+  "about": "The coupon endpoints for the Merchant portal and Admin (DESIGN.md Section 3, promotion-service): requests and the answers they get, in order, against an empty coupon table with the service clock at 'now'. promotion-service's CouponContractTests sends each exchange with the caller's token and expects the status and the body, field by field and scale by scale. '{id}' is the id of the first coupon created; an answer's id, and each id in a page, is checked to be that id or a number, and is left out of the bodies here. Every other answer is pinned in CouponCreateAnswersTests. Change the contract only by changing this file first.",
   "now": "2027-01-01T00:00:00Z",
   "callers": {
     "MERCHANT": "a token with BUYER and MERCHANT, merchantId 3",
@@ -26,6 +26,24 @@
       "request": {"code": "PLATFORM5", "scope": "PLATFORM", "discountType": "FIXED", "discountValue": 5.00, "expiresAt": "2027-03-01T12:00:00+01:00"},
       "status": 201,
       "body": {"code": "PLATFORM5", "scope": "PLATFORM", "merchantId": null, "discountType": "FIXED", "discountValue": 5.00, "expiresAt": "2027-03-01T11:00:00Z", "active": true, "expired": false}
+    },
+    {
+      "name": "the merchant lists its coupons: its own only, never a platform coupon",
+      "caller": "MERCHANT", "method": "GET", "path": "/coupons",
+      "status": 200,
+      "body": {"content": [{"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": true, "expired": false}], "page": 0, "size": 20, "totalElements": 1, "totalPages": 1}
+    },
+    {
+      "name": "Admin lists every coupon, a page of one",
+      "caller": "ADMIN", "method": "GET", "path": "/coupons?page=1&size=1",
+      "status": 200,
+      "body": {"content": [{"code": "PLATFORM5", "scope": "PLATFORM", "merchantId": null, "discountType": "FIXED", "discountValue": 5.00, "expiresAt": "2027-03-01T11:00:00Z", "active": true, "expired": false}], "page": 1, "size": 1, "totalElements": 2, "totalPages": 2}
+    },
+    {
+      "name": "a page size out of range",
+      "caller": "ADMIN", "method": "GET", "path": "/coupons?size=101",
+      "status": 400,
+      "body": {"title": "Bad Request", "status": 400, "detail": "The coupon request breaks 1 rule(s).", "instance": "/coupons", "violations": ["size must be a whole number from 1 to 100."]}
     },
     {
       "name": "a code already taken, after normalising",

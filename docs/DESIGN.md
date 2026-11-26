@@ -1851,6 +1851,14 @@ account); identity-service never issues another, so any other is a 401.
     another merchant's, a platform coupon and a missing one alike, as
     catalog-, inventory- and merchant-service. An id that is not a whole
     number above 0 is a 400, never Spring's conversion message.
+  - `GET /coupons`: Admin lists every coupon; a merchant its own merchant
+    coupons only, never another merchant's or a platform coupon. No filters.
+    Paging as `GET /accounts`: `page` from 0 (default 0), `size` 1 to 100
+    (default 20), both named at once in a 400 when out of range or not a
+    whole number (never clamped, never Spring's conversion message); in `id`
+    order; a page past the end is a 200 with empty `content`. Answer
+    `{content, page, size, totalElements, totalPages}`, each item the coupon
+    as below, `expired` read at one instant for the whole page.
   - *The coupon* in every answer: `{id, code, scope, merchantId (null for a
     platform coupon), discountType, discountValue (scale 2), expiresAt,
     active, expired}`. `active` is the stored flag, which expiry never

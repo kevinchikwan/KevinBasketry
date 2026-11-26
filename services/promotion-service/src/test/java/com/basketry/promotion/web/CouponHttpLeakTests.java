@@ -134,7 +134,7 @@ class CouponHttpLeakTests extends PromotionServiceTestBase {
     }
 
     /**
-     * Successful answers and refusals after the body (403, 409, 404): the
+     * Successful answers (create, read, list) and refusals after the body (403, 409, 404): the
      * tokens are in no log line. Spring writes the answer object at TRACE,
      * code included, which is allowed. Mutation: spring.mvc.log-request-details:
      * true (the Authorization header in a TRACE line).
@@ -154,9 +154,12 @@ class CouponHttpLeakTests extends PromotionServiceTestBase {
         answers.add(send("POST", "/coupons", MERCHANT, body(q("LEAKPLAT2"), q("PLATFORM"), q("FIXED"), "5",
                 q(expiry()))));
         answers.add(send("GET", "/coupons/999999", ADMIN, null));
+        answers.add(send("GET", "/coupons", MERCHANT, null));
+        answers.add(send("GET", "/coupons?page=0&size=5", ADMIN, null));
 
-        assertThat(answers).extracting(HttpResponse::statusCode).containsExactly(201, 200, 200, 201, 409, 403, 404);
-        assertThat(output).contains("Writing [CouponResponse[");
+        assertThat(answers).extracting(HttpResponse::statusCode)
+                .containsExactly(201, 200, 200, 201, 409, 403, 404, 200, 200);
+        assertThat(output).contains("Writing [CouponResponse[").contains("Writing [CouponPage[");
         List<String> leaks = new ArrayList<>();
         for (String token : List.of(ADMIN, MERCHANT)) {
             output.getAll().lines().filter(line -> line.contains(token))

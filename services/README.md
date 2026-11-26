@@ -12,7 +12,7 @@ they talk to each other.
 | `inventory-service` | 8083 | Done (deployment items open) |
 | `payment-service` | 8084 | Done (deployment items open) |
 | `order-service` | 8085 | Done (deployment items open) |
-| `promotion-service` | 8086 | In progress: coupon rules, discount maths, `POST /internal/coupons/price` (ROADMAP A6), `POST /coupons` and `GET /coupons/{id}` (A7) |
+| `promotion-service` | 8086 | In progress: coupon rules, discount maths, `POST /internal/coupons/price` (ROADMAP A6), `POST /coupons`, `GET /coupons` and `GET /coupons/{id}` (A7) |
 | `conversation-service` | 8087 | Not started |
 | `platform-service` | 8088 | Not started |
 

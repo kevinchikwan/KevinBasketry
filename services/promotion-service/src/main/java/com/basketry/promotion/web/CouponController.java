@@ -6,8 +6,11 @@ import com.basketry.promotion.coupon.CouponRepository;
 import com.basketry.promotion.coupon.CouponScope;
 import java.net.URI;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -16,6 +19,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.json.JsonMapper;
@@ -40,8 +44,15 @@ public class CouponController {
     static final String COLLECTION = "/coupons";
     static final String ITEM = "/coupons/{id}";
 
+    static final int DEFAULT_PAGE_SIZE = 20;
+    static final int MAX_PAGE_SIZE = 100;
+    /** Far past any real page; it keeps page times size inside a long. */
+    static final int MAX_PAGE = 99_999_999;
+
     /** A whole number above 0 that fits a long: at most 18 digits. */
     private static final Pattern ID = Pattern.compile("[0-9]{1,18}");
+    /** A paging parameter: digits only, at most 9 (it then fits an int). */
+    private static final Pattern NUMBER = Pattern.compile("[0-9]{1,9}");
 
     private final CouponManagement management;
     private final CouponRepository coupons;
@@ -82,6 +93,34 @@ public class CouponController {
                 .body(CouponResponse.from(created, clock.instant()));
     }
 
+    /**
+     * Admin: every coupon. A merchant: its own merchant coupons only. Paging as
+     * identity-service's GET /accounts: {@code page} from 0 (default 0),
+     * {@code size} 1 to 100 (default 20), anything else a 400, never clamped;
+     * in id order; a page past the end is empty. Both are read here as text:
+     * Spring's conversion error quotes the value.
+     */
+    @GetMapping(path = COLLECTION, produces = MediaType.APPLICATION_JSON_VALUE)
+    public CouponPage list(@RequestParam(required = false) String page, @RequestParam(required = false) String size,
+                           @AuthenticationPrincipal Jwt jwt) {
+        Caller caller = Caller.of(jwt);
+        List<String> violations = new ArrayList<>();
+        int pageNumber = number(page, 0, 0, MAX_PAGE);
+        if (pageNumber < 0) {
+            violations.add("page must be a whole number, 0 or more.");
+        }
+        int pageSize = number(size, DEFAULT_PAGE_SIZE, 1, MAX_PAGE_SIZE);
+        if (pageSize < 0) {
+            violations.add("size must be a whole number from 1 to " + MAX_PAGE_SIZE + ".");
+        }
+        if (!violations.isEmpty()) {
+            throw new InvalidCouponRequestException(violations);
+        }
+        PageRequest request = PageRequest.of(pageNumber, pageSize, Sort.by("id").ascending());
+        return CouponPage.from(caller.admin() ? coupons.findAll(request)
+                : coupons.findByMerchantId(caller.merchantId(), request), clock.instant());
+    }
+
     /** Admin: any coupon, 404 for a missing one. A merchant: its own only, 403 for any other or a missing one. */
     @GetMapping(path = ITEM, produces = MediaType.APPLICATION_JSON_VALUE)
     public CouponResponse read(@PathVariable String id, @AuthenticationPrincipal Jwt jwt) {
@@ -108,6 +147,18 @@ public class CouponController {
             throw new InvalidCouponRequestException(List.of("The body must be a JSON object."));
         }
         return request;
+    }
+
+    /** The parameter as a whole number from min to max, the default when it is absent, or -1 when it is not. */
+    private static int number(String text, int absent, int min, int max) {
+        if (text == null) {
+            return absent;
+        }
+        if (!NUMBER.matcher(text).matches()) {
+            return -1;
+        }
+        int value = Integer.parseInt(text);
+        return value < min || value > max ? -1 : value;
     }
 
     private static long id(String id) {

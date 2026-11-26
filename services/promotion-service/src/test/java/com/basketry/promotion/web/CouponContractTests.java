@@ -51,7 +51,10 @@ class CouponContractTests extends CouponApiTestBase {
         throw new IllegalStateException("promotion-service's directory not found from " + classes);
     }
 
-    /** Mutation: the discount answered without its scale (each answer is also pinned elsewhere). */
+    /**
+     * Mutations: the discount answered without its scale; totalPages one too
+     * many. Each answer is also pinned elsewhere.
+     */
     @Test
     void everyExchangeGetsTheAnswerInTheContract() throws Exception {
         JsonNode contract = JSON.readTree(Files.readString(file(), StandardCharsets.UTF_8));
@@ -84,6 +87,13 @@ class CouponContractTests extends CouponApiTestBase {
                     assertThat(body.get("id").asString()).as(name).isEqualTo(firstId);
                 }
                 body.remove("id");
+            }
+            // A page: each item's id is a number, left out of the bodies in the file.
+            if (body.has("content") && body.get("content").isArray()) {
+                for (JsonNode item : body.get("content")) {
+                    assertThat(item.get("id").isIntegralNumber()).as(name).isTrue();
+                    ((ObjectNode) item).remove("id");
+                }
             }
             if (exchange.has("location")) {
                 assertThat(answer.getHeader(HttpHeaders.LOCATION)).as(name)
