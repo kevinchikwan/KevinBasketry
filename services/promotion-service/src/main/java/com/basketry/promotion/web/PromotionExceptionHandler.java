@@ -1,5 +1,6 @@
 package com.basketry.promotion.web;
 
+import com.basketry.promotion.coupon.CouponCodeTakenException;
 import com.basketry.promotion.pricing.CouponRefusedException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -44,6 +45,22 @@ class PromotionExceptionHandler extends ResponseEntityExceptionHandler {
     ProblemDetail invalid(InvalidPriceRequestException e) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, e.getMessage());
         problem.setProperty("violations", e.violations());
+        return problem;
+    }
+
+    /** 400 naming every broken rule of a coupon request. */
+    @ExceptionHandler(InvalidCouponRequestException.class)
+    ProblemDetail invalidCoupon(InvalidCouponRequestException e) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, e.getMessage());
+        problem.setProperty("violations", e.violations());
+        return problem;
+    }
+
+    /** 409 COUPON_CODE_TAKEN; the detail never quotes the code. */
+    @ExceptionHandler(CouponCodeTakenException.class)
+    ProblemDetail codeTaken(CouponCodeTakenException e) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, e.getMessage());
+        problem.setProperty("code", CouponCodeTakenException.CODE);
         return problem;
     }
 

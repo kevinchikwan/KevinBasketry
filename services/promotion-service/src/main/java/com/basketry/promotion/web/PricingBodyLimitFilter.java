@@ -17,15 +17,15 @@ import org.springframework.http.MediaType;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
- * A pricing body over {@value #LIMIT} bytes is a 413 (DESIGN.md Section 3,
+ * A body over {@value #LIMIT} bytes is a 413 (DESIGN.md Section 3,
  * promotion-service), a copy of order-service's CheckoutBodyLimitFilter,
  * decided by the bytes actually read, not by Content-Length: a
  * chunked body has none, and a declared length can be wrong. The filter reads
  * at most LIMIT + 1 bytes; above the limit it answers 413 at once, otherwise
  * it hands the bytes on. A Content-Length above the limit is refused before
  * reading. The body is held only for this request and is never logged.
- * Registered for /internal/coupons/price, before Spring Security, so a huge
- * body costs no key check (FilterConfig).
+ * Registered for /internal/coupons/price and POST /coupons, before Spring
+ * Security, so a huge body costs no key or token check (FilterConfig).
  */
 class PricingBodyLimitFilter extends OncePerRequestFilter {
 

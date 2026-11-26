@@ -31,7 +31,7 @@ spring:
   mvc:
     problemdetails:
       enabled: true
-    # Never log request details (parameters, headers, so the internal key): set
+    # Never log request details (parameters, headers: the internal key, a bearer token): set
     # explicitly, so the rule does not depend on a default. The request object
     # masks the coupon code and the subtotals (PriceRequest).
     log-request-details: false
@@ -63,3 +63,13 @@ basketry:
     # the other services read. Unset = a WARN at startup and every internal call
     # refused (401); set = at least 32 characters.
     api-key: ${BASKETRY_INTERNAL_API_KEY:}
+  identity:
+    # identity-service's JWKS, for verifying the bearer tokens of the coupon
+    # endpoints (DESIGN.md Section 2, Tokens).
+    base-url: ${BASKETRY_IDENTITY_URL:http://localhost:8080}
+    connect-timeout: 2s
+    read-timeout: 5s
+  cors:
+    # Vite's default dev-server port. Widen this (comma-separated) once the
+    # Merchant portal and the Admin console exist (DESIGN.md Section 1).
+    allowed-origins: http://localhost:5173

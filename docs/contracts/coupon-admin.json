@@ -1,0 +1,64 @@
+{
+  "about": "The coupon endpoints for the Merchant portal and Admin (DESIGN.md Section 3, promotion-service): requests and the answers they get, in order, against an empty coupon table with the service clock at 'now'. promotion-service's CouponContractTests sends each exchange with the caller's token and expects the status and the body, field by field and scale by scale. '{id}' is the id of the first coupon created; an answer's id is checked to be that id or a number, and is left out of the bodies here. Every other answer is pinned in CouponCreateAnswersTests. Change the contract only by changing this file first.",
+  "now": "2027-01-01T00:00:00Z",
+  "callers": {
+    "MERCHANT": "a token with BUYER and MERCHANT, merchantId 3",
+    "ADMIN": "a token with ADMIN",
+    "BUYER": "a token with BUYER only"
+  },
+  "exchanges": [
+    {
+      "name": "a merchant creates its own coupon (the merchant id is the token's)",
+      "caller": "MERCHANT", "method": "POST", "path": "/coupons",
+      "request": {"code": " spring10 ", "scope": "MERCHANT", "discountType": "PERCENTAGE", "discountValue": 10, "expiresAt": "2027-06-01T00:00:00Z"},
+      "status": 201, "location": "/coupons/{id}",
+      "body": {"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": true, "expired": false}
+    },
+    {
+      "name": "the merchant reads it",
+      "caller": "MERCHANT", "method": "GET", "path": "/coupons/{id}",
+      "status": 200,
+      "body": {"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": true, "expired": false}
+    },
+    {
+      "name": "Admin creates a platform coupon",
+      "caller": "ADMIN", "method": "POST", "path": "/coupons",
+      "request": {"code": "PLATFORM5", "scope": "PLATFORM", "discountType": "FIXED", "discountValue": 5.00, "expiresAt": "2027-03-01T12:00:00+01:00"},
+      "status": 201,
+      "body": {"code": "PLATFORM5", "scope": "PLATFORM", "merchantId": null, "discountType": "FIXED", "discountValue": 5.00, "expiresAt": "2027-03-01T11:00:00Z", "active": true, "expired": false}
+    },
+    {
+      "name": "a code already taken, after normalising",
+      "caller": "ADMIN", "method": "POST", "path": "/coupons",
+      "request": {"code": "Spring10", "scope": "PLATFORM", "discountType": "FIXED", "discountValue": 5.00, "expiresAt": "2027-06-01T00:00:00Z"},
+      "status": 409,
+      "body": {"title": "Conflict", "status": 409, "detail": "The coupon code is taken.", "instance": "/coupons", "code": "COUPON_CODE_TAKEN"}
+    },
+    {
+      "name": "a body that breaks the rules",
+      "caller": "MERCHANT", "method": "POST", "path": "/coupons",
+      "request": {"code": "AB", "scope": "MERCHANT", "discountType": "PERCENTAGE", "discountValue": 100.01, "expiresAt": "2027-01-01T00:00:00Z"},
+      "status": 400,
+      "body": {"title": "Bad Request", "status": 400, "detail": "The coupon request breaks 3 rule(s).", "instance": "/coupons", "violations": ["code: A coupon code must be 4 to 32 characters of A-Z, 0-9, _ and -.", "discountValue: A percentage discount is 0.01 to 100.00.", "expiresAt must be after now and at most 2 years ahead."]}
+    },
+    {
+      "name": "a merchant asks for a platform coupon",
+      "caller": "MERCHANT", "method": "POST", "path": "/coupons",
+      "request": {"code": "MINE20", "scope": "PLATFORM", "discountType": "PERCENTAGE", "discountValue": 20, "expiresAt": "2027-06-01T00:00:00Z"},
+      "status": 403,
+      "body": {"title": "Forbidden", "status": 403, "detail": "A merchant can create only its own MERCHANT coupons.", "instance": "/coupons"}
+    },
+    {
+      "name": "a buyer",
+      "caller": "BUYER", "method": "GET", "path": "/coupons/{id}",
+      "status": 403,
+      "body": {"title": "Forbidden", "status": 403, "detail": "Only Admin and merchants can manage coupons.", "instance": "/coupons/{id}"}
+    },
+    {
+      "name": "Admin asks for a coupon that does not exist",
+      "caller": "ADMIN", "method": "GET", "path": "/coupons/999999",
+      "status": 404,
+      "body": {"title": "Not Found", "status": 404, "detail": "No coupon has this id.", "instance": "/coupons/999999"}
+    }
+  ]
+}

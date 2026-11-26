@@ -4,7 +4,10 @@ import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-/** The pricing body limit, on /internal/coupons/price only, ahead of Spring Security's filters. */
+/**
+ * The 64 KB body limit, on /internal/coupons/price and POST /coupons (the only
+ * endpoints that read a body), ahead of Spring Security's filters.
+ */
 @Configuration(proxyBeanMethods = false)
 class FilterConfig {
 
@@ -15,7 +18,7 @@ class FilterConfig {
     FilterRegistrationBean<PricingBodyLimitFilter> pricingBodyLimitFilter() {
         FilterRegistrationBean<PricingBodyLimitFilter> registration =
                 new FilterRegistrationBean<>(new PricingBodyLimitFilter());
-        registration.addUrlPatterns(InternalPricingController.PATH);
+        registration.addUrlPatterns(InternalPricingController.PATH, CouponController.COLLECTION);
         registration.setOrder(BEFORE_SECURITY);
         return registration;
     }

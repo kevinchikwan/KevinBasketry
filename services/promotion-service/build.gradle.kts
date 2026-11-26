@@ -15,16 +15,19 @@ repositories {
     mavenCentral()
 }
 
-// Only what the service uses so far (ROADMAP A6). The resource server comes with
-// the coupon endpoints (A7), and Kafka with the order.succeeded consumer (A8).
+// Only what the service uses so far (ROADMAP A7). Kafka comes with the
+// order.succeeded consumer (A8).
 dependencies {
     implementation(platform(SpringBootPlugin.BOM_COORDINATES))
     testImplementation(platform(SpringBootPlugin.BOM_COORDINATES))
 
-    // The web server: the health endpoint and POST /internal/coupons/price.
+    // The web server: the health endpoint, POST /internal/coupons/price and the coupon endpoints.
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
-    // The /internal/** chain (the shared key) and the closed default chain.
+    // The /internal/** chain (the shared key), the coupon chain (a JWT) and the closed default chain.
     implementation("org.springframework.boot:spring-boot-starter-security")
+    // Bearer-token authentication: verifies identity-service's RS256 tokens against its JWKS endpoint.
+    implementation("org.springframework.security:spring-security-oauth2-resource-server")
+    implementation("org.springframework.security:spring-security-oauth2-jose")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     // The coupon table (Hibernate only validates it against Flyway's schema).
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")

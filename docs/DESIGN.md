@@ -1808,7 +1808,65 @@ account); identity-service never issues another, so any other is a 401.
   other actuator endpoint is exposed.
 
 **promotion-service**
-- `POST /coupons` (Merchant — scope=MERCHANT, or Admin — scope=PLATFORM)
+- **The coupon endpoints** (FR-M10, FR-A9; ROADMAP A7), for the Merchant portal
+  and Admin. Their own security chain: a bearer JWT from identity-service
+  (inventory-service's chain: a request without a valid token is a 401, a token
+  that cannot be checked because the JWKS cannot be fetched a 503), CORS for
+  the portal's origin with `Location` exposed. The caller comes from the token
+  only: Admin (`ADMIN`), or a merchant (`MERCHANT` with a `merchantId` claim, a
+  whole number above 0). Any other token is a 403 before a body is read. The
+  answers come in this order: 401, that 403, 400 for the body or the path, 403
+  for a merchant's scope or merchant id, then 404 (Admin only) and 409. Every
+  answer is pinned in `CouponCreateAnswersTests`; the main ones are in
+  `docs/contracts/coupon-admin.json` (`CouponContractTests`).
+  - `POST /coupons`: body `{"code":"SPRING10", "scope":"MERCHANT",
+    "merchantId":3, "discountType":"PERCENTAGE", "discountValue":10.00,
+    "expiresAt":"2027-06-01T00:00:00Z"}`. A merchant creates only `MERCHANT`
+    coupons for itself: `merchantId` may be left out (it is the token's) or
+    sent as the same value; another value, or `PLATFORM`, is a 403. Admin
+    creates either scope and must give a `MERCHANT` coupon's `merchantId`
+    (taken as a reference only; no merchant-service check). 201 with
+    `Location: /coupons/{id}` and the coupon.
+  - *Body rules*, named at once in a 400 (`violations`, never a value sent),
+    in the order of the fields: `code` through the code rule (Section 2,
+    promotion-service, Codes), stored normalised; `scope` exactly `MERCHANT`
+    or `PLATFORM`; `merchantId` a whole number above 0, only on a `MERCHANT`
+    coupon; `discountType` exactly `PERCENTAGE` or `FIXED`; `discountValue` a
+    JSON number by the pricing rules (percentage 0.01 to 100.00, fixed above
+    0 and at most 9,999,999,999.99, at most 2 decimal places); `expiresAt` an
+    ISO-8601 instant with `Z` or an offset, kept to microseconds, after now and
+    at most 2 years ahead (service clock). Strict JSON as for pricing, and the
+    body read by the controller; an unknown field's name is shown only by
+    order-service's rule (a letter first, at most 41 letters, digits and `_`,
+    no run of 6 digits), any other is counted. A body over 64 KB is 413
+    `BODY_TOO_LARGE` before the token check; a body that is not
+    `application/json` is Spring's 415.
+  - *A code already taken*, after normalising and across both scopes (one
+    namespace), is 409 `COUPON_CODE_TAKEN` ("The coupon code is taken.", the
+    code not echoed). There is no lookup before the insert: the unique
+    constraint decides, so two creates at the same moment are one 201 and one
+    409, never a 500 (`CouponCreateRaceTests`, on PostgreSQL).
+  - `GET /coupons/{id}`: Admin reads any coupon, and alone gets a 404 for a
+    missing one; a merchant reads its own merchant coupons, and gets a 403 for
+    another merchant's, a platform coupon and a missing one alike, as
+    catalog-, inventory- and merchant-service. An id that is not a whole
+    number above 0 is a 400, never Spring's conversion message.
+  - *The coupon* in every answer: `{id, code, scope, merchantId (null for a
+    platform coupon), discountType, discountValue (scale 2), expiresAt,
+    active, expired}`. `active` is the stored flag, which expiry never
+    changes; `expired` is read at answer time with the service clock (`now >=
+    expiresAt`, as pricing reads it). A coupon is accepted at checkout only
+    when it is active and not expired. The usage count comes with A8.
+  - *Logging*: a coupon code is **not a secret**. Its owner chose it, and every
+    coupon answer shows it, so these endpoints do not mask it (Spring's TRACE
+    line of the answer object holds it). The pricing endpoint keeps its own
+    rule below, as it receives a buyer's attempt rather than an owner's
+    record. `CouponHttpLeakTests` checks, with Spring's web layer and Spring
+    Security at TRACE: a sentinel sent in a refused body (a wrong-typed or
+    unquoted value, a value a rule refuses, an unknown field's name or value,
+    a repeated name, a trailing token, a code the rule refuses) is in no log
+    line and no answer; and no bearer token, Admin's or a merchant's, is in a
+    log line, successful answers included.
 - `POST /internal/coupons/price` (internal key; for order-service's checkout,
   after the cart rules and before the price check, Section 2, order-service).
   Body `{"code":"SAVE10", "merchants":[{"merchantId":3, "subtotal":25.50},
@@ -1845,10 +1903,11 @@ account); identity-service never issues another, so any other is a 401.
   - **`/internal/**`** follows merchant-service's rules: its own security chain,
     the shared key in `X-Internal-Api-Key` only (never a bearer token),
     compared in constant time, no CORS headers. No key, a wrong key, and no key
-    configured (a WARN at startup) are the same bare 401. Every other path but
-    `/actuator/health` is a bare 401 until the coupon endpoints (ROADMAP A7)
-    bring the JWT chain. The coupon code, a subtotal and the key are never
-    logged at any level.
+    configured (a WARN at startup) are the same bare 401. A bearer token opens
+    nothing here, and the key opens no coupon endpoint. Every path other than
+    `/actuator/health` and the coupon endpoints is a bare 401, with a valid
+    token or not. On this endpoint the coupon code, a subtotal and the key are
+    never logged at any level.
 
 **conversation-service**
 - `POST /orders/{reference}/threads/{merchantCode}/messages`
