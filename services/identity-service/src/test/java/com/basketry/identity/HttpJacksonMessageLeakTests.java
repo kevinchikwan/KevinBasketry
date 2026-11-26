@@ -170,6 +170,56 @@ class HttpJacksonMessageLeakTests {
     }
 
     /**
+     * Successful answers: Spring logs the object it writes at TRACE ("Writing
+     * [...]"). A registration, a login, the account read with its own token, the
+     * Admin list, a merchant link that creates an account and one that links
+     * the existing account. The answers hold the email by design; no log line
+     * may hold it, and nothing may hold the password. Mutations: AccountResponse's
+     * toString with the email; MerchantLinkResponse's toString with the email.
+     */
+    @org.junit.jupiter.api.Test
+    void successfulAnswersPutNoSentinelInALogLine(CapturedOutput output) throws Exception {
+        String registered = EMAIL_HEAD + "+ok1@example.com";
+        String linked = EMAIL_HEAD + "+ok2@example.com";
+        List<HttpResponse<String>> responses = new java.util.ArrayList<>();
+
+        HttpResponse<String> register = send("POST", "/accounts/register",
+                "{\"email\":" + q(registered) + ",\"password\":" + q(PASSWORD) + "}");
+        responses.add(register);
+        String id = register.headers().firstValue("Location").orElseThrow().replaceAll(".*/", "");
+        HttpResponse<String> login = send("POST", "/auth/login",
+                "{\"email\":" + q(registered) + ",\"password\":" + q(PASSWORD) + "}");
+        responses.add(login);
+        String token = JsonPath.read(login.body(), "$.accessToken");
+        responses.add(client.send(HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/accounts/" + id))
+                .header("Authorization", "Bearer " + token).GET().build(), HttpResponse.BodyHandlers.ofString()));
+        String admin = JsonPath.read(send("POST", "/auth/login", "{\"email\":" + q(ADMIN_EMAIL) + ",\"password\":"
+                + q(ADMIN_PASSWORD) + "}").body(), "$.accessToken");
+        responses.add(client.send(HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/accounts"))
+                .header("Authorization", "Bearer " + admin).GET().build(), HttpResponse.BodyHandlers.ofString()));
+        responses.add(send("POST", "/internal/accounts/merchant-link", "{\"email\":" + q(linked)
+                + ",\"merchantId\":41,\"initialPassword\":" + q(PASSWORD) + "}", "X-Internal-Api-Key", KEY));
+        responses.add(send("POST", "/internal/accounts/merchant-link", "{\"email\":" + q(registered)
+                + ",\"merchantId\":42}", "X-Internal-Api-Key", KEY));
+
+        assertThat(responses).extracting(HttpResponse::statusCode).containsExactly(201, 200, 200, 200, 201, 200);
+        // The check would be empty if the logging were off: the answers are written at TRACE.
+        assertThat(output).contains("Writing [AccountResponse[").contains("Writing [MerchantLinkResponse[")
+                .contains("Writing [AccountPage[");
+        List<String> leaks = new java.util.ArrayList<>();
+        for (String sentinel : SENTINELS) {
+            output.getAll().lines().filter(line -> line.contains(sentinel))
+                    .forEach(line -> leaks.add("log:" + sentinel + " :: " + line));
+        }
+        for (HttpResponse<String> response : responses) {
+            if (response.body().contains(SHORT_PASSWORD)) {
+                leaks.add("answer:password :: " + response.body());
+            }
+        }
+        assertThat(leaks).isEmpty();
+    }
+
+    /**
      * Mutations, one per controller: the body read by Spring again
      * ({@code @Valid @RequestBody} with the request type) in AccountController's
      * register, in its buyer status, in AuthController and in

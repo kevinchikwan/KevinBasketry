@@ -1168,26 +1168,37 @@ shape for review.
   One global Jackson setting covers every request body, present and future.
   A string field (`email`, `password`) still takes a JSON number as text
   (ROADMAP F: strict strings).
-- **Never logged: passwords and emails.** The four endpoints with a body
-  (register, login, buyer status, merchant link) take it as bytes and read
-  it with `RequestBodyReader`: the application's own JsonMapper, then the
-  request's bean-validation constraints through the application's
-  Validator. When Spring read the body, Spring logged Jackson's message at
-  DEBUG and TRACE (it quotes a wrong-typed value), a failed `@Valid` check
-  with its rejected value at DEBUG (an invalid email), and the request
-  object at TRACE (with the email). Now an unreadable body and a broken
-  constraint are the same 400s as before (`Failed to read request`,
-  `Invalid request content.`) and carry no value; the request records
-  print neither the email nor the password in `toString`; the policy's
-  400 never quotes the password. `HttpJacksonMessageLeakTests` sends a
-  password and an email sentinel over a real port, with Spring's web layer
-  at TRACE and Tomcat and our own loggers at DEBUG, in 27 ways: as a JSON
-  number or an object for a string, a string or a number for
-  `buyerActive` and `merchantId`, as a repeated or unknown field name,
-  inside an unknown field, as an unknown field's value, as or before a
-  trailing token, too short or breaking the policy, an invalid email, a
-  negative `merchantId`, a missing password, a wrong password and a valid
-  registration; no log line and no answer holds either.
+- **Passwords and emails in the log: what is covered.** With Spring's web
+  layer at TRACE and Tomcat and our own loggers at DEBUG, four channels
+  could carry them, and each is closed:
+  - *Request objects* (Spring's TRACE "Read ... to [...]" and "Arguments:
+    [...]" lines): Spring no longer reads the four bodies (register, login,
+    buyer status, merchant link). Each controller takes the bytes and
+    `RequestBodyReader` reads them (the application's own JsonMapper, then
+    the request's constraints through the application's Validator). The
+    request records still print neither the email nor the password.
+  - *Response objects* (Spring's TRACE "Writing [...]" line):
+    `AccountResponse` (also inside the Admin list's `AccountPage`) and
+    `MerchantLinkResponse` print `email=***`. The JSON answers are
+    unchanged and hold the email by design.
+  - *Jackson's message* (DEBUG and TRACE; it quotes a wrong-typed value):
+    an unreadable body is the same 400 as before (`Failed to read
+    request`) and keeps neither the message nor the exception.
+  - *Rejected values* (DEBUG; a failed `@Valid` check printed the invalid
+    email): a broken constraint is the same 400 as before (`Invalid
+    request content.`) and keeps no field error. The policy's 400 never
+    quotes the password.
+
+  `HttpJacksonMessageLeakTests` sends a password and an email sentinel over
+  a real port in 27 failing or refused ways (a JSON number or an object for
+  a string, a string or a number for `buyerActive` and `merchantId`, as a
+  repeated or unknown field name, inside an unknown field, as an unknown
+  field's value, as or before a trailing token, too short or breaking the
+  policy, an invalid email, a negative `merchantId`, a missing password, a
+  wrong password) and in successful answers (a registration, a login, the
+  account read with its own token, the Admin list, a merchant link that
+  creates an account and one that links an existing one): no log line
+  holds either, and no answer holds the password.
   `IdentityBadRequestBodiesTests` pins every 400, 401, 405 and 415 byte
   for byte, each proven against the code before the change: unreadable
   and wrong-typed bodies, every `@Valid` failure, empty and blank bodies
@@ -1196,9 +1207,15 @@ shape for review.
   charset that cannot be parsed) and charset (a non-Unicode charset
   decodes the body; a Unicode one is left to Jackson's detection, so UTF-8
   labelled UTF-16 is read), and other methods (405; `Allow` for
-  `/accounts/register` includes GET, as `GET /accounts/{id}` matches it). Known limitation: catalog-service and inventory-service still let
-  Spring read their bodies; none holds personal data, but a wrong-typed
-  value can be quoted in Spring's DEBUG and TRACE log.
+  `/accounts/register` includes GET, as `GET /accounts/{id}` matches it).
+
+  Known limits: a successful login's answer, with the **access token**, is
+  written in full in Spring's TRACE log (`Writing [LoginResponse[...]]`);
+  the other answers hold no email or password; and the checks are only as
+  good as the cases the leak test sends. catalog-service
+  and inventory-service still let Spring read their bodies; none holds
+  personal data, but a wrong-typed value can be quoted in Spring's DEBUG
+  and TRACE log.
 - *(No merchant-status endpoint here — merchant activation happens only
   via `PATCH /merchants/{code}` on `merchant-service`; see Section 2.)*
 - `POST /internal/accounts/merchant-link` (internal-only — called by

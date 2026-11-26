@@ -24,4 +24,11 @@ public record AccountResponse(
                 account.isMerchantActive(),
                 account.getCreatedAt());
     }
+
+    /** Without the email: Spring logs the answer it writes at TRACE ("Writing [...]"). */
+    @Override
+    public String toString() {
+        return "AccountResponse[id=" + id + ", email=***, buyerActive=" + buyerActive + ", merchantId=" + merchantId
+                + ", merchantActive=" + merchantActive + ", createdAt=" + createdAt + "]";
+    }
 }

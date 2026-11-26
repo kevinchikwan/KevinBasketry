@@ -35,4 +35,12 @@ public record MerchantLinkResponse(
                 account.getCreatedAt(),
                 outcome);
     }
+
+    /** Without the email: Spring logs the answer it writes at TRACE ("Writing [...]"). */
+    @Override
+    public String toString() {
+        return "MerchantLinkResponse[id=" + id + ", email=***, buyerActive=" + buyerActive + ", merchantId="
+                + merchantId + ", merchantActive=" + merchantActive + ", createdAt=" + createdAt + ", outcome="
+                + outcome + "]";
+    }
 }
