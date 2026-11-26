@@ -12,7 +12,7 @@ they talk to each other.
 | `inventory-service` | 8083 | Done (deployment items open) |
 | `payment-service` | 8084 | Done (deployment items open) |
 | `order-service` | 8085 | Done (deployment items open) |
-| `promotion-service` | 8086 | In progress: coupon rules, discount maths, `POST /internal/coupons/price` (ROADMAP A6), `POST /coupons`, `GET /coupons` and `GET /coupons/{id}` (A7) |
+| `promotion-service` | 8086 | In progress: coupon rules, discount maths, `POST /internal/coupons/price` (ROADMAP A6), the coupon endpoints for the Merchant portal and Admin (A7) |
 | `conversation-service` | 8087 | Not started |
 | `platform-service` | 8088 | Not started |
 
@@ -279,6 +279,30 @@ any. Without the key, or with a user token instead of it, `/internal/**`
 answers a bare 401. inventory-service finds identity-service's JWKS at
 `BASKETRY_IDENTITY_URL` (default `http://localhost:8080`), as merchant-service
 does. DESIGN.md Section 3 lists every endpoint and rule.
+
+## Trying promotion-service's coupon endpoints by hand
+
+Start identity-service, merchant-service and promotion-service (H2 is fine,
+Kafka not needed), each from a PowerShell window in which the same internal key
+is set first, as above. Then, from another window with the variable set:
+
+```
+$admin = (Invoke-RestMethod -Method Post http://localhost:8080/auth/login -ContentType 'application/json' -Body '{"email":"admin-placeholder@basketry.example","password":"ChangeMe-Before-Deploy!"}').accessToken
+Invoke-RestMethod -Method Post http://localhost:8082/merchants -Headers @{ Authorization = "Bearer $admin" } -ContentType 'application/json' -Body '{"name":"Corner Shop","category":"Groceries","kycVerified":true,"commissionRate":5.00,"loginEmail":"shop@example.com","initialPassword":"Shop-Pass1"}'
+$merchant = (Invoke-RestMethod -Method Post http://localhost:8080/auth/login -ContentType 'application/json' -Body '{"email":"shop@example.com","password":"Shop-Pass1"}').accessToken
+$expiry = (Get-Date).ToUniversalTime().AddDays(30).ToString('yyyy-MM-ddTHH:mm:ssZ')
+$coupon = Invoke-RestMethod -Method Post http://localhost:8086/coupons -Headers @{ Authorization = "Bearer $merchant" } -ContentType 'application/json' -Body "{`"code`":`"spring10`",`"scope`":`"MERCHANT`",`"discountType`":`"PERCENTAGE`",`"discountValue`":10,`"expiresAt`":`"$expiry`"}"
+Invoke-RestMethod -Method Post http://localhost:8086/coupons -Headers @{ Authorization = "Bearer $admin" } -ContentType 'application/json' -Body "{`"code`":`"PLATFORM5`",`"scope`":`"PLATFORM`",`"discountType`":`"FIXED`",`"discountValue`":5.00,`"expiresAt`":`"$expiry`"}"
+Invoke-RestMethod http://localhost:8086/coupons -Headers @{ Authorization = "Bearer $merchant" } | ConvertTo-Json -Depth 5
+Invoke-RestMethod "http://localhost:8086/coupons?page=0&size=10" -Headers @{ Authorization = "Bearer $admin" } | ConvertTo-Json -Depth 5
+Invoke-RestMethod -Method Post "http://localhost:8086/coupons/$($coupon.id)/deactivate" -Headers @{ Authorization = "Bearer $merchant" }
+```
+
+The merchant sees only its own coupon (stored as `SPRING10`), Admin both.
+Creating `SPRING10` again, in any case, is a 409 `COUPON_CODE_TAKEN`; a merchant
+asking for a `PLATFORM` coupon is a 403. After the deactivation the coupon shows
+`active: false`, and checkout refuses its code as `COUPON_INACTIVE`. Every answer
+is in DESIGN.md Section 3 and docs/contracts/coupon-admin.json.
 
 ## Sending inventory-service a request by hand
 

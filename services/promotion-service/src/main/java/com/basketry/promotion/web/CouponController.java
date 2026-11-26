@@ -43,6 +43,7 @@ public class CouponController {
 
     static final String COLLECTION = "/coupons";
     static final String ITEM = "/coupons/{id}";
+    static final String DEACTIVATE = "/coupons/{id}/deactivate";
 
     static final int DEFAULT_PAGE_SIZE = 20;
     static final int MAX_PAGE_SIZE = 100;
@@ -129,6 +130,22 @@ public class CouponController {
         Coupon coupon = coupons.findById(couponId).filter(caller::mayRead).orElseThrow(() -> caller.admin()
                 ? new CouponNotFoundException() : CouponAccessDeniedException.notItsOwnToSee());
         return CouponResponse.from(coupon, clock.instant());
+    }
+
+    /**
+     * Deactivates a coupon (FR-M11, FR-A10): Admin any coupon, a merchant its
+     * own; one way, never a delete. 200 with the coupon as it now is, the same
+     * when it was already inactive or has expired. A body is ignored. Admin
+     * alone gets a 404 for a missing coupon; a merchant gets a 403 for another
+     * merchant's, a platform coupon and a missing one, and nothing changes.
+     */
+    @PostMapping(path = DEACTIVATE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public CouponResponse deactivate(@PathVariable String id, @AuthenticationPrincipal Jwt jwt) {
+        Caller caller = Caller.of(jwt);
+        long couponId = id(id);
+        Coupon coupon = coupons.findById(couponId).filter(caller::mayDeactivate).orElseThrow(() -> caller.admin()
+                ? new CouponNotFoundException() : CouponAccessDeniedException.notItsOwnToDeactivate());
+        return CouponResponse.from(management.deactivate(coupon), clock.instant());
     }
 
     private CreateCouponRequest read(byte[] body) {

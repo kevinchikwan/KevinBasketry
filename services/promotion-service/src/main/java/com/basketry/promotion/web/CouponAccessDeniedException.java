@@ -26,6 +26,11 @@ class CouponAccessDeniedException extends ErrorResponseException {
         return new CouponAccessDeniedException("A merchant can create only its own MERCHANT coupons.");
     }
 
+    /** Another merchant's coupon, a platform coupon, or none: nothing is changed. */
+    static CouponAccessDeniedException notItsOwnToDeactivate() {
+        return new CouponAccessDeniedException("Only Admin and the coupon's merchant can deactivate this coupon.");
+    }
+
     /** Another merchant's coupon, a platform coupon, or none. */
     static CouponAccessDeniedException notItsOwnToSee() {
         return new CouponAccessDeniedException("Only Admin and the coupon's merchant can see this coupon.");

@@ -1859,6 +1859,13 @@ account); identity-service never issues another, so any other is a 401.
     order; a page past the end is a 200 with empty `content`. Answer
     `{content, page, size, totalElements, totalPages}`, each item the coupon
     as below, `expired` read at one instant for the whole page.
+  - `POST /coupons/{id}/deactivate` (FR-M11, FR-A10): Admin any coupon, a
+    merchant its own merchant coupons, by the same 403/404 rule as `GET
+    /coupons/{id}`; nothing changes on a refusal. One way: there is no
+    reactivation and no delete (`DELETE` is a 405), so the row stays for
+    A8's usage counts and pricing refuses the code as `COUPON_INACTIVE`. 200
+    with the coupon as it now is, the same when it was already inactive or
+    has expired (a retry is safe). No body is read; one sent is ignored.
   - *The coupon* in every answer: `{id, code, scope, merchantId (null for a
     platform coupon), discountType, discountValue (scale 2), expiresAt,
     active, expired}`. `active` is the stored flag, which expiry never

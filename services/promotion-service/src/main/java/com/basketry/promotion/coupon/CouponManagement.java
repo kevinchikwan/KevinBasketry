@@ -39,6 +39,16 @@ public class CouponManagement {
         }
     }
 
+    /**
+     * One way, never a delete (pricing then refuses it as COUPON_INACTIVE).
+     * An inactive coupon stays as it is: deactivating it again is no change
+     * and no error.
+     */
+    public Coupon deactivate(Coupon coupon) {
+        coupon.deactivate();
+        return coupons.saveAndFlush(coupon);
+    }
+
     /** Only the unique code: any other violation is a bug, and stays a 500. */
     private static boolean isTheUniqueCode(DataIntegrityViolationException violation) {
         for (Throwable cause = violation; cause != null; cause = cause.getCause()) {

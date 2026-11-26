@@ -77,6 +77,24 @@
       "caller": "ADMIN", "method": "GET", "path": "/coupons/999999",
       "status": 404,
       "body": {"title": "Not Found", "status": 404, "detail": "No coupon has this id.", "instance": "/coupons/999999"}
+    },
+    {
+      "name": "the merchant deactivates its coupon: no body, the coupon as it now is",
+      "caller": "MERCHANT", "method": "POST", "path": "/coupons/{id}/deactivate",
+      "status": 200,
+      "body": {"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": false, "expired": false}
+    },
+    {
+      "name": "again: the same answer, nothing changed",
+      "caller": "MERCHANT", "method": "POST", "path": "/coupons/{id}/deactivate",
+      "status": 200,
+      "body": {"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": false, "expired": false}
+    },
+    {
+      "name": "a buyer cannot deactivate",
+      "caller": "BUYER", "method": "POST", "path": "/coupons/{id}/deactivate",
+      "status": 403,
+      "body": {"title": "Forbidden", "status": 403, "detail": "Only Admin and merchants can manage coupons.", "instance": "/coupons/{id}/deactivate"}
     }
   ]
 }

@@ -53,7 +53,8 @@ class CouponContractTests extends CouponApiTestBase {
 
     /**
      * Mutations: the discount answered without its scale; totalPages one too
-     * many. Each answer is also pinned elsewhere.
+     * many; the deactivated coupon answered as still active. Each answer is
+     * also pinned elsewhere.
      */
     @Test
     void everyExchangeGetsTheAnswerInTheContract() throws Exception {

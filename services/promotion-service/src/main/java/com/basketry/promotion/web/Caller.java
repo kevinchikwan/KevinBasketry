@@ -27,4 +27,9 @@ record Caller(boolean admin, long merchantId) {
     boolean mayRead(Coupon coupon) {
         return admin || coupon.getMerchantId() != null && coupon.getMerchantId() == merchantId;
     }
+
+    /** The same rule as reading: Admin any coupon, a merchant only its own merchant coupons (FR-M11, FR-A10). */
+    boolean mayDeactivate(Coupon coupon) {
+        return mayRead(coupon);
+    }
 }
