@@ -6,10 +6,12 @@ spring:
   application:
     name: catalog-service
 
-  # Default: in-memory H2 in PostgreSQL mode, emptied on every restart. The
-  # "postgres" profile (application-postgres.yml) keeps the data in PostgreSQL.
+  # Default: in-memory H2 in PostgreSQL mode, emptied on every restart, and
+  # kept while the service runs, even with no open connection (DB_CLOSE_DELAY;
+  # LocalDatabaseTests). The "postgres" profile (application-postgres.yml)
+  # keeps the data in PostgreSQL.
   datasource:
-    url: jdbc:h2:mem:catalog;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    url: jdbc:h2:mem:catalog;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1
     username: sa
     password: ""
 

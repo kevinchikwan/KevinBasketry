@@ -603,6 +603,9 @@ reads the old status events again, so every merchant reads as active.
 - **Redis** can be restarted or wiped at any time: it holds nothing that
   inventory-service cannot reload from its database, or catalog-service cannot
   read again.
+- **An idle service on H2 keeps its database**: the URL ends in
+  `DB_CLOSE_DELAY=-1`, so H2 does not drop it when every connection is closed.
+  Only a restart empties it.
 - **On H2**, every restart empties that service's database. Restart **all**
   services and run `docker compose down -v` together, whichever one you meant
   to restart. Restarting only merchant-service resets its merchant ids and

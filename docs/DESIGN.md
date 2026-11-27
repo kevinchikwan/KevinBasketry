@@ -2800,6 +2800,12 @@ Kubernetes) that a smaller/cheaper deployment could have skipped.
 - Each service runs on in-memory H2 by default, and on Postgres with its Spring
   profile `postgres` (`application-postgres.yml`). Flyway runs the same
   migrations on both, and Hibernate only validates the schema.
+  The H2 URL ends in `DB_CLOSE_DELAY=-1`: H2 otherwise drops an in-memory
+  database when its last connection closes, and a service left idle (Hikari
+  retiring every connection, or a laptop asleep) then answered 500 with "Table
+  not found" (F5). The database now lasts as long as the service's JVM, and
+  still goes with every restart. Each service's `LocalDatabaseTests` checks
+  that a table outlives every connection of a pool on that URL.
 - **Kafka and Postgres keep their data in named volumes, and are kept or wiped
   together**, because each depends on the other: Postgres holds the merchant
   versions, the payment transactions and both outboxes, Kafka the events already
