@@ -26,6 +26,8 @@ public abstract class PromotionServiceTestBase {
 
     @BeforeEach
     void emptyTheDatabase() {
+        // Usages first: each references its coupon.
+        jdbc.update("DELETE FROM coupon_usage");
         jdbc.update("DELETE FROM coupon");
     }
 }

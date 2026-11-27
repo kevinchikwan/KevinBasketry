@@ -1023,7 +1023,7 @@ Coupon
 
 CouponUsage                      -- one row per counted order.succeeded
   eventId (PK)                   -- the event's eventId: a redelivery inserts nothing
-  couponId (FK), orderId, occurredAt
+  couponId (FK), orderId, occurredAt  -- orderId not unique: after order-service loses its data, ids repeat
 ```
 **Codes.** A code is case-insensitive: it is normalised on creation, on
 pricing and in order-service before the fingerprint, and it is unique on the
@@ -1045,6 +1045,19 @@ its code, deduplicated by `eventId`. The count is shown to the coupon's owner
 and has **no effect on validation**. Nothing is written at checkout time, so a
 coupon in a failed order is not counted by construction rather than by
 remembering to roll a counter back.
+
+**Counting** (ROADMAP A8). Every `order.succeeded` with a `couponCode` adds one
+row, whatever the coupon is now (inactive or expired: the order succeeded with
+it), and whatever its discount came to (0.00 included). An event with a `null`
+code writes nothing. The insert decides a repeat, not a lookup before it: the
+primary key `pk_coupon_usage` refuses a second row for one `eventId`, and that
+violation is "already counted" (`CouponUsageRaceTests`, on PostgreSQL). Any
+other violation is a bug and goes to the dead-letter topic. An event whose code
+no coupon has is **skipped with a WARN that shows only the `eventId` and the
+`orderId`**, and its offset is committed. A coupon is never deleted, so this
+means **promotion-service has lost its data** (for example an H2 restart), not a
+fault that a retry or a replay could cure; the order is simply not counted.
+Pricing never writes a `coupon_usage` row (`CouponPricingDatabaseTests`).
 
 **Amount rules.** All money at scale 2.
 
@@ -2574,8 +2587,66 @@ derived from its lines: `subtotal` the sum of its line amounts, `discount`
 equal to it, `amount` 0.00, `commission` 0.00, and `commissionRate` and
 `transactionRef` `null` (nothing was charged, so no rate was applied). A fully
 comped order has `totalAmount` 0.00 and every merchant in that form. Every
-money value is a JSON number at scale 2. `schemaVersion` stays 1: no service
-consumes the event yet. The example above (no coupon) is the golden file's.
+money value is a JSON number at scale 2. promotion-service consumes the event
+(below), so a change that breaks its parser needs `schemaVersion` 2, and both
+versions accepted while the services are rolled out; a new field does not
+(unknown fields are ignored). The example above (no coupon) is the golden
+file's, and promotion-service's parser test reads that same file from
+order-service's module.
+
+**promotion-service's `order.succeeded` listener** (the usage count, Section 2,
+promotion-service):
+- **Settings** as order-service's result listeners: one listener, group id
+  `promotion-service` (`idIsGroup = false`, so the container id never becomes
+  the group; `OrderSucceededKafkaTests` checks the group has one member holding
+  all three partitions), `auto.offset.reset=earliest`, the container committing
+  after each record, `metadata.max.age.ms` 10 s, `max.poll.records` 50, Kafka
+  not needed to start (`StartsWithoutKafkaTests`), and the topic, which belongs
+  to order-service, never created here. **The key and the value are read as
+  bytes** and decoded by the parser, strictly: `StringDeserializer` would turn
+  bytes that are not UTF-8 into replacement characters instead of refusing
+  them, and the dead letter keeps the record byte for byte.
+- **The listener only parses the record and calls `CouponUsageService`, and
+  never runs inside a transaction**; the service opens its own, so a lost race
+  on the primary key is caught after its transaction has ended
+  (`TransactionBoundaryTests`, which counts calls when they return).
+- **Parsing** follows order-service's result parser: on the JSON tree, by
+  hand, `schemaVersion` checked first and only `1`; `eventId` a UUID string,
+  `orderId` a positive whole JSON number that fits 64 bits, `occurredAt` an
+  ISO-8601 instant string; `couponCode` present, `null` or already normalised
+  (order-service normalises it before the fingerprint); `merchants` a
+  non-empty array of objects, each with a `merchantId` and a `discount` (a JSON
+  number, 0 or more, at most 2 decimal places), checked but not kept; a
+  repeated field or anything after the object refused, unknown fields ignored.
+  The Kafka key is not checked.
+- **An event that cannot be counted:**
+
+  | Case | Action |
+  |---|---|
+  | No value (a tombstone), a value that is not UTF-8, malformed JSON, a missing, repeated or wrongly typed field | Dead-letter topic, then the next record |
+  | Unknown `schemaVersion` | Dead-letter topic, then the next record |
+  | `couponCode` `null` | Nothing written, offset committed |
+  | A code no coupon has (lost promotion-service data) | WARN with the `eventId` and `orderId` only, skipped, offset committed |
+  | The same `eventId` again | Nothing written (the primary key), offset committed |
+  | Any unexpected exception, a constraint other than the primary key included | Dead-letter topic, then the next record |
+  | Database error (anywhere in the cause chain) | Retry with no limit, seeking back, waiting 1, 2, 4 … up to 60 s; the offset is not committed |
+
+- **Dead-letter topic:** `order.succeeded.promotion-service.DLT`, 3
+  partitions, keyed like the original, owned by promotion-service and created
+  on first use, with only our two exception headers, never quoting a value.
+  Replaying one by hand is safe: the `eventId` deduplicates.
+- **Logging:** never the coupon code (pricing's rule), the buyer or an amount;
+  a counted event is logged at DEBUG with its `eventId`, `orderId` and the
+  coupon's id. `OrderSucceededLeakTests` sends a sentinel in malformed events,
+  in a record key and as a code no coupon has, with Spring Kafka at DEBUG, and
+  finds it in no log line and no dead-letter header. Never run
+  `org.springframework.kafka` or `org.apache.kafka.clients` at TRACE: they
+  print whole records.
+- **Switch:** `basketry.coupon-usage.consumer.enabled`, on by default and off in
+  tests, which call the service directly unless a test class turns it on. The
+  retry waits are `basketry.coupon-usage.retry-initial` (1 s) and `retry-max`
+  (60 s); the dead-letter topic's partitions
+  `basketry.coupon-usage.dead-letter-partitions` (3).
 
 **`order.failed`** (written in the transaction that makes the order `FAILED`;
 again after a reopen, with a new `eventId`):

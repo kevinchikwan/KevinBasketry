@@ -12,9 +12,9 @@ paths: declines, missing stock, a service that stays down past the deadline,
 and a crash in the middle of an order.
 
 **Status:** 6 of the 9 services are built: identity, catalog, merchant,
-inventory, payment and order. Promotion is in progress (coupon pricing and the
-coupon endpoints; its usage count is next); conversation and platform are
-designed but not built. Of the three front-ends, only `buyer-web` is started
+inventory, payment and order. Promotion is in progress (coupon pricing, the
+coupon endpoints and the usage count; the count on the coupon answers is
+next); conversation and platform are designed but not built. Of the three front-ends, only `buyer-web` is started
 (register, login). Kubernetes and AWS are not started. The status of each
 service is in [`services/README.md`](services/README.md).
 

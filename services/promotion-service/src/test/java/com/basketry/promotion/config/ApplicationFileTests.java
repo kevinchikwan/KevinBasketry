@@ -54,4 +54,27 @@ class ApplicationFileTests {
         assertThat(application.getProperty("spring.mvc.log-request-details")).isEqualTo("false");
         assertThat(application.getProperty("server.tomcat.accesslog.enabled")).isEqualTo("false");
     }
+
+    /**
+     * The order.succeeded listener runs unless switched off, in group
+     * promotion-service, reading bytes (a value that is not UTF-8 is refused,
+     * not repaired) and committing after each record. Mutations:
+     * {@code consumer.enabled: false}; group-id order-service; the
+     * StringDeserializer for the value; ack-mode batch.
+     */
+    @Test
+    void theUsageListenerIsOnByDefault() {
+        YamlPropertiesFactoryBean yaml = new YamlPropertiesFactoryBean();
+        yaml.setResources(new ClassPathResource("application.yml"));
+        Properties application = yaml.getObject();
+
+        assertThat(application.getProperty("basketry.coupon-usage.consumer.enabled")).isEqualTo("true");
+        assertThat(application.getProperty("spring.kafka.consumer.group-id")).isEqualTo("promotion-service");
+        assertThat(application.getProperty("spring.kafka.consumer.key-deserializer"))
+                .isEqualTo("org.apache.kafka.common.serialization.ByteArrayDeserializer");
+        assertThat(application.getProperty("spring.kafka.consumer.value-deserializer"))
+                .isEqualTo("org.apache.kafka.common.serialization.ByteArrayDeserializer");
+        assertThat(application.getProperty("spring.kafka.consumer.enable-auto-commit")).isEqualTo("false");
+        assertThat(application.getProperty("spring.kafka.listener.ack-mode")).isEqualTo("record");
+    }
 }

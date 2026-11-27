@@ -12,7 +12,7 @@ they talk to each other.
 | `inventory-service` | 8083 | Done (deployment items open) |
 | `payment-service` | 8084 | Done (deployment items open) |
 | `order-service` | 8085 | Done (deployment items open) |
-| `promotion-service` | 8086 | In progress: coupon rules, discount maths, `POST /internal/coupons/price` (ROADMAP A6), the coupon endpoints for the Merchant portal and Admin (A7) |
+| `promotion-service` | 8086 | In progress: coupon rules, discount maths, `POST /internal/coupons/price` (ROADMAP A6), the coupon endpoints for the Merchant portal and Admin (A7), the `order.succeeded` listener and the usage count (A8) |
 | `conversation-service` | 8087 | Not started |
 | `platform-service` | 8088 | Not started |
 
@@ -48,10 +48,11 @@ missing, and catalog-service fills its cache again as listings are read. It runs
 with 64 MB and `volatile-lru`: when full, it evicts cached listing pages (they
 have a TTL) and never a stock counter (no TTL; DESIGN.md Section 7).
 
-promotion-service does not use Kafka yet (its `order.succeeded` consumer is
-ROADMAP A8). The six other services also run without Kafka. order-service: a checkout is still
-accepted, and its requests wait in its outbox until the broker is back (a
-checkout does need identity-service, catalog-service and merchant-service: if
+All seven services run without Kafka. promotion-service: pricing and the
+coupon endpoints still work, and its `order.succeeded` listener connects once
+the broker is back, then counts the orders it missed (it starts from its
+committed offset). order-service: a checkout is still accepted, and its
+requests wait in its outbox until the broker is back (a checkout does need identity-service, catalog-service and merchant-service: if
 one is down, it is refused with a 503 and nothing is stored). Its result
 listeners connect once the broker is back. An outage longer than the 2-minute
 deadline fails the orders it holds up: their unsent requests are cancelled and

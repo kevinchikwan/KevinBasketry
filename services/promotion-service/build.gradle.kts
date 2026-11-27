@@ -15,8 +15,7 @@ repositories {
     mavenCentral()
 }
 
-// Only what the service uses so far (ROADMAP A7). Kafka comes with the
-// order.succeeded consumer (A8).
+// Only what the service uses so far (ROADMAP A8).
 dependencies {
     implementation(platform(SpringBootPlugin.BOM_COORDINATES))
     testImplementation(platform(SpringBootPlugin.BOM_COORDINATES))
@@ -38,9 +37,13 @@ dependencies {
     runtimeOnly("org.postgresql:postgresql")
     // Flyway's PostgreSQL support is a separate module since Flyway 10.
     runtimeOnly("org.flywaydb:flyway-database-postgresql")
+    // The order.succeeded listener (the usage count) and its dead-letter topic.
+    implementation("org.springframework.boot:spring-boot-starter-kafka")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
+    // An embedded KRaft broker for the listener tests: no Docker.
+    testImplementation("org.springframework.boot:spring-boot-starter-kafka-test")
     // Only for postgresTest; the default test task never starts a container.
     testImplementation("org.testcontainers:testcontainers-postgresql")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

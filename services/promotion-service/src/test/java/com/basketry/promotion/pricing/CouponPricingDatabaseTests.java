@@ -113,13 +113,15 @@ class CouponPricingDatabaseTests extends PromotionServiceTestBase {
 
     /**
      * Every column of every coupon, and the row count, the same after a priced
-     * coupon and after each refusal. (No coupon_usage row: that table comes
-     * with ROADMAP A8, which adds the assertion here.) Mutations, each before
-     * the service's return: {@code coupons.saveAndFlush(new Coupon(...))} (an
-     * insert); {@code coupon.deactivate()} with {@code @Transactional(readOnly = true)}
-     * made {@code @Transactional} (an update at commit). With readOnly kept, the deactivation is never
-     * written even by {@code saveAndFlush}: the session is read-only, so the
-     * loaded coupon is not dirty-checked.
+     * coupon and after each refusal, and no coupon_usage row: a coupon is
+     * counted only from order.succeeded, so a failed order is never counted
+     * (ROADMAP A8). Mutations, each before the service's return:
+     * {@code usages.saveAndFlush(new CouponUsage(...))} (a usage row);
+     * {@code coupons.saveAndFlush(new Coupon(...))} (an insert);
+     * {@code coupon.deactivate()} with {@code @Transactional(readOnly = true)}
+     * made {@code @Transactional} (an update at commit). With readOnly kept,
+     * the deactivation is never written even by {@code saveAndFlush}: the
+     * session is read-only, so the loaded coupon is not dirty-checked.
      */
     @Test
     void pricingWritesNothing() {
@@ -142,6 +144,7 @@ class CouponPricingDatabaseTests extends PromotionServiceTestBase {
         assertRefused(new CouponCode("PLATFORM10"), cart, CouponRefusal.COUPON_EXPIRED);
 
         assertThat(rows()).hasSize(3).isEqualTo(before);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM coupon_usage", Long.class)).isZero();
     }
 
     private List<Map<String, Object>> rows() {

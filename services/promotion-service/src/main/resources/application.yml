@@ -48,6 +48,52 @@ spring:
     mapper:
       allow-coercion-of-scalars: false
 
+  # order.succeeded in, for the usage count, and its dead-letter topic out
+  # (DESIGN.md Section 5, promotion-service). Startup never waits for Kafka.
+  kafka:
+    bootstrap-servers: ${BASKETRY_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: promotion-service
+      # Orders that succeeded before this service first started are still counted.
+      auto-offset-reset: earliest
+      # The container commits after each record is applied, never before.
+      enable-auto-commit: false
+      max-poll-records: 50
+      # Bytes, decoded by OrderSucceededParser: StringDeserializer would turn a
+      # value that is not UTF-8 into replacement characters instead of refusing
+      # it, and the dead letter keeps the key and the value byte for byte.
+      key-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+      properties:
+        # order-service owns order.succeeded and creates it on its first publish.
+        # Until then it is missing, which is normal; this is how soon the consumer
+        # notices it (the client's default is 5 minutes).
+        allow.auto.create.topics: false
+        metadata.max.age.ms: 10000
+        # Keeps the log readable while the broker is down.
+        reconnect.backoff.max.ms: 10000
+    listener:
+      ack-mode: record
+      concurrency: 1
+      missing-topics-fatal: false
+    # Only the dead-letter topic: the original key and value, as bytes.
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      properties:
+        enable.idempotence: true
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+    admin:
+      # Startup never touches Kafka: the dead-letter topic is created on first use.
+      auto-create: false
+      operation-timeout: 3s
+      properties:
+        request.timeout.ms: 3000
+        default.api.timeout.ms: 3000
+
 # The health endpoint only, with no details (no database or disk information).
 management:
   endpoints:
@@ -75,3 +121,13 @@ basketry:
     # Vite's default dev-server port. Widen this (comma-separated) once the
     # Merchant portal and the Admin console exist (DESIGN.md Section 1).
     allowed-origins: http://localhost:5173
+  # The order.succeeded listener and its dead-letter topic (DESIGN.md Section 5).
+  coupon-usage:
+    consumer:
+      enabled: true
+    # order.succeeded.promotion-service.DLT, created here on first use.
+    dead-letter-partitions: 3
+    replication-factor: 1
+    # After a database failure: wait 1s, 2s, 4s ... up to 60s, with no limit.
+    retry-initial: 1s
+    retry-max: 60s
