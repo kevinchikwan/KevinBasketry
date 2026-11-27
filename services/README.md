@@ -302,8 +302,11 @@ Invoke-RestMethod -Method Post "http://localhost:8086/coupons/$($coupon.id)/deac
 The merchant sees only its own coupon (stored as `SPRING10`), Admin both.
 Creating `SPRING10` again, in any case, is a 409 `COUPON_CODE_TAKEN`; a merchant
 asking for a `PLATFORM` coupon is a 403. After the deactivation the coupon shows
-`active: false`, and checkout refuses its code as `COUPON_INACTIVE`. Every answer
-is in DESIGN.md Section 3 and docs/contracts/coupon-admin.json.
+`active: false`, and checkout refuses its code as `COUPON_INACTIVE`. Every
+answer shows `usageCount`, the orders counted for the coupon from
+`order.succeeded`; it stays 0 here, as order-service sends no coupon until
+ROADMAP A9. Every answer is in DESIGN.md Section 3 and
+docs/contracts/coupon-admin.json.
 
 ## Sending inventory-service a request by hand
 

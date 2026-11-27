@@ -1871,7 +1871,8 @@ account); identity-service never issues another, so any other is a 401.
     whole number (never clamped, never Spring's conversion message); in `id`
     order; a page past the end is a 200 with empty `content`. Answer
     `{content, page, size, totalElements, totalPages}`, each item the coupon
-    as below, `expired` read at one instant for the whole page.
+    as below, `expired` read at one instant for the whole page and the usage
+    counts in one grouped query for the page's coupons (none for an empty page).
   - `POST /coupons/{id}/deactivate` (FR-M11, FR-A10): Admin any coupon, a
     merchant its own merchant coupons, by the same 403/404 rule as `GET
     /coupons/{id}`; nothing changes on a refusal. One way: there is no
@@ -1881,10 +1882,14 @@ account); identity-service never issues another, so any other is a 401.
     has expired (a retry is safe). No body is read; one sent is ignored.
   - *The coupon* in every answer: `{id, code, scope, merchantId (null for a
     platform coupon), discountType, discountValue (scale 2), expiresAt,
-    active, expired}`. `active` is the stored flag, which expiry never
-    changes; `expired` is read at answer time with the service clock (`now >=
-    expiresAt`, as pricing reads it). A coupon is accepted at checkout only
-    when it is active and not expired. The usage count comes with A8.
+    active, expired, usageCount}`. `active` is the stored flag, which expiry
+    never changes; `expired` is read at answer time with the service clock
+    (`now >= expiresAt`, as pricing reads it). A coupon is accepted at checkout
+    only when it is active and not expired. `usageCount` is the number of
+    orders counted for the coupon from `order.succeeded` (Section 2,
+    promotion-service): 0 for a new coupon, kept by a deactivation, and never a
+    factor in pricing. It was added with A8, and is additive (no other field
+    changed).
   - *Logging*: a coupon code is **not a secret**. Its owner chose it, and every
     coupon answer shows it, so these endpoints do not mask it (Spring's TRACE
     line of the answer object holds it). The pricing endpoint keeps its own

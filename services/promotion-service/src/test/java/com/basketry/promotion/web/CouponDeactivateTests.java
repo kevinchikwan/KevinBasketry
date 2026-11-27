@@ -40,7 +40,7 @@ class CouponDeactivateTests extends CouponApiTestBase {
                 .andExpect(content().contentType(MediaType.APPLICATION_JSON))
                 .andExpect(content().json("{\"id\":" + own.getId() + ",\"code\":\"OWN10\",\"scope\":\"MERCHANT\","
                         + "\"merchantId\":3,\"discountType\":\"PERCENTAGE\",\"discountValue\":10.00,"
-                        + "\"expiresAt\":\"2027-06-01T00:00:00Z\",\"active\":false,\"expired\":false}",
+                        + "\"expiresAt\":\"2027-06-01T00:00:00Z\",\"active\":false,\"expired\":false,\"usageCount\":0}",
                         JsonCompareMode.STRICT));
         assertThat(coupons.findById(own.getId()).orElseThrow().isActive()).isFalse();
     }

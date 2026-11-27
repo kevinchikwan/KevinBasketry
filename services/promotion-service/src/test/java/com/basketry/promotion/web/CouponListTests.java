@@ -73,10 +73,10 @@ class CouponListTests extends CouponApiTestBase {
         list(MERCHANT_TOKEN, "").andExpect(status().isOk()).andExpect(content().json("{\"content\":["
                 + "{\"id\":" + june.getId() + ",\"code\":\"OWN10\",\"scope\":\"MERCHANT\",\"merchantId\":3,"
                 + "\"discountType\":\"PERCENTAGE\",\"discountValue\":10.00,\"expiresAt\":\"2027-06-01T00:00:00Z\","
-                + "\"active\":true,\"expired\":false},"
+                + "\"active\":true,\"expired\":false,\"usageCount\":0},"
                 + "{\"id\":" + past.getId() + ",\"code\":\"OLD10\",\"scope\":\"MERCHANT\",\"merchantId\":3,"
                 + "\"discountType\":\"PERCENTAGE\",\"discountValue\":10.00,\"expiresAt\":\"2027-01-01T00:00:00Z\","
-                + "\"active\":true,\"expired\":true}],"
+                + "\"active\":true,\"expired\":true,\"usageCount\":0}],"
                 + "\"page\":0,\"size\":20,\"totalElements\":2,\"totalPages\":1}", JsonCompareMode.STRICT));
     }
 

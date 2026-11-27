@@ -12,32 +12,32 @@
       "caller": "MERCHANT", "method": "POST", "path": "/coupons",
       "request": {"code": " spring10 ", "scope": "MERCHANT", "discountType": "PERCENTAGE", "discountValue": 10, "expiresAt": "2027-06-01T00:00:00Z"},
       "status": 201, "location": "/coupons/{id}",
-      "body": {"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": true, "expired": false}
+      "body": {"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": true, "expired": false, "usageCount": 0}
     },
     {
       "name": "the merchant reads it",
       "caller": "MERCHANT", "method": "GET", "path": "/coupons/{id}",
       "status": 200,
-      "body": {"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": true, "expired": false}
+      "body": {"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": true, "expired": false, "usageCount": 0}
     },
     {
       "name": "Admin creates a platform coupon",
       "caller": "ADMIN", "method": "POST", "path": "/coupons",
       "request": {"code": "PLATFORM5", "scope": "PLATFORM", "discountType": "FIXED", "discountValue": 5.00, "expiresAt": "2027-03-01T12:00:00+01:00"},
       "status": 201,
-      "body": {"code": "PLATFORM5", "scope": "PLATFORM", "merchantId": null, "discountType": "FIXED", "discountValue": 5.00, "expiresAt": "2027-03-01T11:00:00Z", "active": true, "expired": false}
+      "body": {"code": "PLATFORM5", "scope": "PLATFORM", "merchantId": null, "discountType": "FIXED", "discountValue": 5.00, "expiresAt": "2027-03-01T11:00:00Z", "active": true, "expired": false, "usageCount": 0}
     },
     {
       "name": "the merchant lists its coupons: its own only, never a platform coupon",
       "caller": "MERCHANT", "method": "GET", "path": "/coupons",
       "status": 200,
-      "body": {"content": [{"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": true, "expired": false}], "page": 0, "size": 20, "totalElements": 1, "totalPages": 1}
+      "body": {"content": [{"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": true, "expired": false, "usageCount": 0}], "page": 0, "size": 20, "totalElements": 1, "totalPages": 1}
     },
     {
       "name": "Admin lists every coupon, a page of one",
       "caller": "ADMIN", "method": "GET", "path": "/coupons?page=1&size=1",
       "status": 200,
-      "body": {"content": [{"code": "PLATFORM5", "scope": "PLATFORM", "merchantId": null, "discountType": "FIXED", "discountValue": 5.00, "expiresAt": "2027-03-01T11:00:00Z", "active": true, "expired": false}], "page": 1, "size": 1, "totalElements": 2, "totalPages": 2}
+      "body": {"content": [{"code": "PLATFORM5", "scope": "PLATFORM", "merchantId": null, "discountType": "FIXED", "discountValue": 5.00, "expiresAt": "2027-03-01T11:00:00Z", "active": true, "expired": false, "usageCount": 0}], "page": 1, "size": 1, "totalElements": 2, "totalPages": 2}
     },
     {
       "name": "a page size out of range",
@@ -82,13 +82,13 @@
       "name": "the merchant deactivates its coupon: no body, the coupon as it now is",
       "caller": "MERCHANT", "method": "POST", "path": "/coupons/{id}/deactivate",
       "status": 200,
-      "body": {"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": false, "expired": false}
+      "body": {"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": false, "expired": false, "usageCount": 0}
     },
     {
       "name": "again: the same answer, nothing changed",
       "caller": "MERCHANT", "method": "POST", "path": "/coupons/{id}/deactivate",
       "status": 200,
-      "body": {"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": false, "expired": false}
+      "body": {"code": "SPRING10", "scope": "MERCHANT", "merchantId": 3, "discountType": "PERCENTAGE", "discountValue": 10.00, "expiresAt": "2027-06-01T00:00:00Z", "active": false, "expired": false, "usageCount": 0}
     },
     {
       "name": "a buyer cannot deactivate",

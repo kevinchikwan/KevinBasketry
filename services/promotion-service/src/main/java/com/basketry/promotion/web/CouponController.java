@@ -4,11 +4,15 @@ import com.basketry.promotion.coupon.Coupon;
 import com.basketry.promotion.coupon.CouponManagement;
 import com.basketry.promotion.coupon.CouponRepository;
 import com.basketry.promotion.coupon.CouponScope;
+import com.basketry.promotion.usage.CouponUsageRepository;
 import java.net.URI;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
+import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.MediaType;
@@ -37,6 +41,9 @@ import tools.jackson.databind.json.JsonMapper;
  * pricing endpoint does: when Spring reads it, a Jackson error reaches
  * Spring's DEBUG log with Jackson's message, which quotes the input. The path
  * id is a string read here too: Spring's conversion error quotes the value.
+ *
+ * <p>Every coupon answer carries {@code usageCount} (ROADMAP A8): a new coupon
+ * 0, one coupon its own count, a list page one grouped query for its coupons.
  */
 @RestController
 public class CouponController {
@@ -57,12 +64,15 @@ public class CouponController {
 
     private final CouponManagement management;
     private final CouponRepository coupons;
+    private final CouponUsageRepository usages;
     private final JsonMapper json;
     private final Clock clock;
 
-    public CouponController(CouponManagement management, CouponRepository coupons, JsonMapper json, Clock clock) {
+    public CouponController(CouponManagement management, CouponRepository coupons, CouponUsageRepository usages,
+                            JsonMapper json, Clock clock) {
         this.management = management;
         this.coupons = coupons;
+        this.usages = usages;
         this.json = json;
         this.clock = clock;
     }
@@ -91,7 +101,7 @@ public class CouponController {
         Coupon created = management.create(new Coupon(valid.code(), valid.scope(), merchantId, valid.discount(),
                 valid.expiresAt()));
         return ResponseEntity.created(URI.create(COLLECTION + "/" + created.getId()))
-                .body(CouponResponse.from(created, clock.instant()));
+                .body(CouponResponse.from(created, clock.instant(), 0));
     }
 
     /**
@@ -118,8 +128,9 @@ public class CouponController {
             throw new InvalidCouponRequestException(violations);
         }
         PageRequest request = PageRequest.of(pageNumber, pageSize, Sort.by("id").ascending());
-        return CouponPage.from(caller.admin() ? coupons.findAll(request)
-                : coupons.findByMerchantId(caller.merchantId(), request), clock.instant());
+        Page<Coupon> found = caller.admin() ? coupons.findAll(request)
+                : coupons.findByMerchantId(caller.merchantId(), request);
+        return CouponPage.from(found, clock.instant(), usageCounts(found.getContent()));
     }
 
     /** Admin: any coupon, 404 for a missing one. A merchant: its own only, 403 for any other or a missing one. */
@@ -129,7 +140,7 @@ public class CouponController {
         long couponId = id(id);
         Coupon coupon = coupons.findById(couponId).filter(caller::mayRead).orElseThrow(() -> caller.admin()
                 ? new CouponNotFoundException() : CouponAccessDeniedException.notItsOwnToSee());
-        return CouponResponse.from(coupon, clock.instant());
+        return CouponResponse.from(coupon, clock.instant(), usages.countByCouponId(coupon.getId()));
     }
 
     /**
@@ -145,7 +156,20 @@ public class CouponController {
         long couponId = id(id);
         Coupon coupon = coupons.findById(couponId).filter(caller::mayDeactivate).orElseThrow(() -> caller.admin()
                 ? new CouponNotFoundException() : CouponAccessDeniedException.notItsOwnToDeactivate());
-        return CouponResponse.from(management.deactivate(coupon), clock.instant());
+        Coupon deactivated = management.deactivate(coupon);
+        return CouponResponse.from(deactivated, clock.instant(), usages.countByCouponId(deactivated.getId()));
+    }
+
+    /** One grouped query for a page's coupons: coupon id to count, absent meaning 0; none for an empty page. */
+    private Map<Long, Long> usageCounts(List<Coupon> page) {
+        Map<Long, Long> counts = new HashMap<>();
+        if (page.isEmpty()) {
+            return counts;
+        }
+        for (Object[] row : usages.countByCouponIds(page.stream().map(Coupon::getId).toList())) {
+            counts.put(((Number) row[0]).longValue(), ((Number) row[1]).longValue());
+        }
+        return counts;
     }
 
     private CreateCouponRequest read(byte[] body) {

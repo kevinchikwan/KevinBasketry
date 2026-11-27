@@ -30,7 +30,7 @@ class CouponCreateTests extends CouponApiTestBase {
                                  String expiresAt, boolean active, boolean expired) {
         return "{\"id\":" + id + ",\"code\":\"" + code + "\",\"scope\":\"" + scope + "\",\"merchantId\":" + merchantId
                 + ",\"discountType\":\"" + type + "\",\"discountValue\":" + value + ",\"expiresAt\":\"" + expiresAt
-                + "\",\"active\":" + active + ",\"expired\":" + expired + "}";
+                + "\",\"active\":" + active + ",\"expired\":" + expired + ",\"usageCount\":0}";
     }
 
     private long created(MvcResult result) throws Exception {
